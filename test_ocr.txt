@@ -1,0 +1,26 @@
+PRESCRIPTION
+
+Patient: Test Patient
+
+Date: 25-08-2026
+
+1, Paracetamol 500 mg
+Dose: 1 tablet
+Frequency: Twice daily
+Duration: 5 days
+
+Instructions: After food
+
+2. Cetirizine 10 mg
+Dose: 1 tablet
+Frequency: Once daily
+Duration: 5 days
+
+Instructions: At night
+
+3. Omeprazole 20 mg
+Dose: 1 capsule
+Frequency: Once daily
+Duration: 7 days
+
+Instructions: Before breakfast
