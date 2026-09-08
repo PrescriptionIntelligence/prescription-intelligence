@@ -561,3 +561,377 @@ class TestOCRTextScorer:
             "Duration 7 days\n"
         )
         assert score_long > score_short
+
+
+# =========================================================
+# Auth router — _authenticate helper and /auth/token tests
+#
+# Uses a module-scoped in-memory SQLite database so no
+# PostgreSQL connection is required.
+# =========================================================
+
+import pytest
+from fastapi.testclient import TestClient
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
+from sqlalchemy.pool import StaticPool
+
+from backend.database import Base, get_db
+from backend.models import UserDB, OrganizationDB
+from backend.security import hash_password
+from backend.routers.auth import _authenticate
+
+
+# ------------------------------------------------------------------
+# Module-scoped in-memory SQLite — one DB shared across the module.
+#
+# StaticPool forces every engine.connect() call to reuse the SAME
+# underlying sqlite3 connection, so tables created in one session
+# are visible to all other sessions (including the TestClient's
+# override_get_db).  Without it, each new connection gets a fresh,
+# empty in-memory database and queries fail with "no such table".
+# ------------------------------------------------------------------
+
+SQLITE_URL = "sqlite://"  # pure in-memory, no file
+
+
+@pytest.fixture(scope="module")
+def auth_db_engine():
+    engine = create_engine(
+        SQLITE_URL,
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    Base.metadata.create_all(engine)
+    yield engine
+    Base.metadata.drop_all(engine)
+
+
+@pytest.fixture(scope="module")
+def auth_db_session(auth_db_engine):
+    """
+    Module-scoped session. All seed fixtures write once; tests are
+    read-only afterwards so no per-test rollback is needed.
+    """
+    Session = sessionmaker(bind=auth_db_engine, autoflush=False, autocommit=False)
+    session = Session()
+    yield session
+    session.close()
+
+
+@pytest.fixture(scope="module")
+def active_user(auth_db_session):
+    """Insert one active user, reused by every test in the module."""
+    existing = (
+        auth_db_session.query(UserDB)
+        .filter(UserDB.email == "test@example.com")
+        .first()
+    )
+    if existing:
+        return existing
+
+    org = OrganizationDB(name="Test Pharmacy", slug="test-pharmacy-auth")
+    auth_db_session.add(org)
+    auth_db_session.flush()
+
+    user = UserDB(
+        organization_id=org.id,
+        name="Test User",
+        email="test@example.com",
+        password_hash=hash_password("correct-password"),
+        role="pharmacist",
+        is_active=True,
+    )
+    auth_db_session.add(user)
+    auth_db_session.commit()
+    auth_db_session.refresh(user)
+    return user
+
+
+@pytest.fixture(scope="module")
+def inactive_user(auth_db_session):
+    """Insert one inactive user, reused by every test in the module."""
+    existing = (
+        auth_db_session.query(UserDB)
+        .filter(UserDB.email == "inactive@example.com")
+        .first()
+    )
+    if existing:
+        return existing
+
+    org = OrganizationDB(name="Inactive Pharmacy", slug="inactive-pharmacy-auth")
+    auth_db_session.add(org)
+    auth_db_session.flush()
+
+    user = UserDB(
+        organization_id=org.id,
+        name="Inactive User",
+        email="inactive@example.com",
+        password_hash=hash_password("password123"),
+        role="pharmacist",
+        is_active=False,
+    )
+    auth_db_session.add(user)
+    auth_db_session.commit()
+    auth_db_session.refresh(user)
+    return user
+
+
+# ------------------------------------------------------------------
+# _authenticate() unit tests  (no HTTP layer)
+# ------------------------------------------------------------------
+
+class TestAuthenticateHelper:
+
+    def test_valid_credentials_return_token(self, active_user, auth_db_session):
+        result = _authenticate("test@example.com", "correct-password", auth_db_session)
+        assert "access_token" in result
+        assert result["token_type"] == "bearer"
+        assert result["user"]["email"] == "test@example.com"
+
+    def test_email_is_case_insensitive(self, active_user, auth_db_session):
+        result = _authenticate("TEST@EXAMPLE.COM", "correct-password", auth_db_session)
+        assert "access_token" in result
+
+    def test_email_with_surrounding_whitespace(self, active_user, auth_db_session):
+        result = _authenticate("  test@example.com  ", "correct-password", auth_db_session)
+        assert "access_token" in result
+
+    def test_wrong_password_raises_401(self, active_user, auth_db_session):
+        from fastapi import HTTPException
+        with pytest.raises(HTTPException) as exc_info:
+            _authenticate("test@example.com", "wrong-password", auth_db_session)
+        assert exc_info.value.status_code == 401
+
+    def test_unknown_email_raises_401(self, active_user, auth_db_session):
+        from fastapi import HTTPException
+        with pytest.raises(HTTPException) as exc_info:
+            _authenticate("nobody@example.com", "correct-password", auth_db_session)
+        assert exc_info.value.status_code == 401
+
+    def test_inactive_user_raises_403(self, inactive_user, auth_db_session):
+        from fastapi import HTTPException
+        with pytest.raises(HTTPException) as exc_info:
+            _authenticate("inactive@example.com", "password123", auth_db_session)
+        assert exc_info.value.status_code == 403
+
+    def test_response_includes_user_fields(self, active_user, auth_db_session):
+        result = _authenticate("test@example.com", "correct-password", auth_db_session)
+        user = result["user"]
+        assert user["email"] == "test@example.com"
+        assert user["name"] == "Test User"
+        assert user["role"] == "pharmacist"
+        assert "id" in user
+
+    def test_response_includes_organization(self, active_user, auth_db_session):
+        result = _authenticate("test@example.com", "correct-password", auth_db_session)
+        assert result["organization"] is not None
+        assert "slug" in result["organization"]
+
+
+# ------------------------------------------------------------------
+# /auth/token endpoint tests  (TestClient, in-memory DB)
+# ------------------------------------------------------------------
+
+@pytest.fixture(scope="module")
+def test_app(auth_db_engine):
+    """
+    Mount a TestClient for the FastAPI app, overriding get_db to use
+    the same in-memory SQLite engine so no PostgreSQL is needed.
+    """
+    from backend.main import app
+
+    Session = sessionmaker(bind=auth_db_engine, autoflush=False, autocommit=False)
+
+    def override_get_db():
+        session = Session()
+        try:
+            yield session
+        finally:
+            session.close()
+
+    app.dependency_overrides[get_db] = override_get_db
+    client = TestClient(app, raise_server_exceptions=False)
+    yield client
+    app.dependency_overrides.clear()
+
+
+@pytest.fixture(scope="module")
+def token_test_user(auth_db_session):
+    """
+    User created once in the shared engine, used by all HTTP endpoint tests.
+    """
+    existing = (
+        auth_db_session.query(UserDB)
+        .filter(UserDB.email == "token@example.com")
+        .first()
+    )
+    if existing:
+        return existing
+
+    org = OrganizationDB(name="Token Pharmacy", slug="token-pharmacy")
+    auth_db_session.add(org)
+    auth_db_session.flush()
+
+    user = UserDB(
+        organization_id=org.id,
+        name="Token User",
+        email="token@example.com",
+        password_hash=hash_password("token-password-99"),
+        role="pharmacist",
+        is_active=True,
+    )
+    auth_db_session.add(user)
+    auth_db_session.commit()
+    auth_db_session.refresh(user)
+    return user
+
+
+class TestTokenEndpoint:
+
+    def test_valid_form_credentials_return_200(
+        self, test_app, token_test_user
+    ):
+        response = test_app.post(
+            "/auth/token",
+            data={
+                "username": "token@example.com",
+                "password": "token-password-99",
+            },
+        )
+        assert response.status_code == 200
+        body = response.json()
+        assert "access_token" in body
+        assert body["token_type"] == "bearer"
+
+    def test_token_endpoint_wrong_password_returns_401(
+        self, test_app, token_test_user
+    ):
+        response = test_app.post(
+            "/auth/token",
+            data={
+                "username": "token@example.com",
+                "password": "wrong-password",
+            },
+        )
+        assert response.status_code == 401
+
+    def test_token_endpoint_unknown_user_returns_401(
+        self, test_app, token_test_user
+    ):
+        response = test_app.post(
+            "/auth/token",
+            data={
+                "username": "nobody@example.com",
+                "password": "doesnt-matter",
+            },
+        )
+        assert response.status_code == 401
+
+    def test_token_endpoint_json_body_returns_422(
+        self, test_app, token_test_user
+    ):
+        """
+        /auth/token requires form-encoded body; a JSON body must be rejected.
+        """
+        response = test_app.post(
+            "/auth/token",
+            json={
+                "username": "token@example.com",
+                "password": "token-password-99",
+            },
+        )
+        assert response.status_code == 422
+
+    def test_login_endpoint_still_accepts_json(
+        self, test_app, token_test_user
+    ):
+        """
+        Adding /auth/token must not break the existing JSON /auth/login endpoint.
+        """
+        response = test_app.post(
+            "/auth/login",
+            json={
+                "email": "token@example.com",
+                "password": "token-password-99",
+            },
+        )
+        assert response.status_code == 200
+        body = response.json()
+        assert "access_token" in body
+        assert body["token_type"] == "bearer"
+
+    def test_login_endpoint_rejects_form_body(
+        self, test_app, token_test_user
+    ):
+        """
+        /auth/login still requires a JSON body, not form-encoded data.
+        """
+        response = test_app.post(
+            "/auth/login",
+            data={
+                "email": "token@example.com",
+                "password": "token-password-99",
+            },
+        )
+        assert response.status_code == 422
+
+    def test_issued_token_authorizes_users_me(
+        self, test_app, token_test_user
+    ):
+        """
+        A token from /auth/token can be used with Bearer auth on /users/me.
+        """
+        # Get token via the OAuth2 form endpoint
+        token_response = test_app.post(
+            "/auth/token",
+            data={
+                "username": "token@example.com",
+                "password": "token-password-99",
+            },
+        )
+        assert token_response.status_code == 200
+        access_token = token_response.json()["access_token"]
+
+        # Use it on /users/me
+        me_response = test_app.get(
+            "/users/me",
+            headers={"Authorization": f"Bearer {access_token}"},
+        )
+        assert me_response.status_code == 200
+        assert me_response.json()["email"] == "token@example.com"
+
+    def test_token_and_login_issue_equivalent_tokens(
+        self, test_app, token_test_user
+    ):
+        """
+        Both endpoints produce tokens that authorize the same user on /users/me.
+        """
+        form_resp = test_app.post(
+            "/auth/token",
+            data={
+                "username": "token@example.com",
+                "password": "token-password-99",
+            },
+        )
+        json_resp = test_app.post(
+            "/auth/login",
+            json={
+                "email": "token@example.com",
+                "password": "token-password-99",
+            },
+        )
+        form_token = form_resp.json()["access_token"]
+        json_token = json_resp.json()["access_token"]
+
+        me_form = test_app.get(
+            "/users/me",
+            headers={"Authorization": f"Bearer {form_token}"},
+        )
+        me_json = test_app.get(
+            "/users/me",
+            headers={"Authorization": f"Bearer {json_token}"},
+        )
+        assert me_form.status_code == 200
+        assert me_json.status_code == 200
+        assert me_form.json()["email"] == me_json.json()["email"]
