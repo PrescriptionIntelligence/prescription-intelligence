@@ -1,5 +1,5 @@
 from pydantic import BaseModel, Field, field_validator
-from typing import Optional
+from typing import Any, Optional
 from uuid import UUID
 from datetime import datetime
 
@@ -7,6 +7,7 @@ from datetime import datetime
 class DoseComponent(BaseModel):
     value: float
     unit: str
+
 
 class MedicineEvidence(BaseModel):
     accepted: Optional[bool] = None
@@ -20,6 +21,7 @@ class MedicineEvidence(BaseModel):
     second_best_score: Optional[float] = None
     ranked_results: list[dict] = Field(default_factory=list)
 
+
 class MedicineBase(BaseModel):
     # Identification
     name: str
@@ -27,7 +29,7 @@ class MedicineBase(BaseModel):
     brand_name: Optional[str] = None
 
     # Strength
-    strength_value: float | str | None
+    strength_value: float | str | None = None
     strength_unit: Optional[str] = None
     strength_components: list[DoseComponent] = Field(default_factory=list)
 
@@ -73,6 +75,7 @@ class MedicineBase(BaseModel):
     matched_term: Optional[str] = None
     evidence: Optional[MedicineEvidence] = None
     raw_text: Optional[str] = None
+    status: Optional[str] = None
 
     # Convert database NULL -> empty list
     @field_validator(
@@ -103,29 +106,31 @@ class PrescriptionCreate(BaseModel):
     medicines: list[MedicineCreate] = Field(default_factory=list)
 
 
+class SafetyFlagResponse(BaseModel):
+    type: str
+    severity: str
+    medicine: Optional[str] = None
+    message: str
+
+
 class PrescriptionResponse(BaseModel):
     id: UUID
     prescription_id: str
     raw_text: Optional[str] = None
     status: str
+    safety_flags: list[Any] = Field(default_factory=list)
 
     file_name: Optional[str] = None
     file_path: Optional[str] = None
     file_type: Optional[str] = None
 
     created_at: datetime
+    updated_at: Optional[datetime] = None
     medicines: list[MedicineResponse] = Field(default_factory=list)
 
     model_config = {
         "from_attributes": True
     }
-
-
-class SafetyFlagResponse(BaseModel):
-    type: str
-    severity: str
-    medicine: Optional[str] = None
-    message: str
 
 
 class PrescriptionUploadResponse(BaseModel):
@@ -134,7 +139,31 @@ class PrescriptionUploadResponse(BaseModel):
     file_name: str
     file_type: str
     file_path: str
+    stored_filename: Optional[str] = None
     status: str
     raw_text: Optional[str] = None
     medicines: list[MedicineBase] = Field(default_factory=list)
-    safety_flags: list[SafetyFlagResponse] = Field(default_factory=list)
+    safety_flags: list[Any] = Field(default_factory=list)
+    analysis_metadata: Optional[dict] = None
+
+
+# ---------------------------------------------------------
+# Dashboard
+# ---------------------------------------------------------
+
+class RecentPrescriptionSummary(BaseModel):
+    prescription_id: str
+    file_name: Optional[str] = None
+    created_at: str
+    status: str
+    medicine_count: int
+    safety_count: int
+    avg_confidence: Optional[float] = None
+
+
+class DashboardStatsResponse(BaseModel):
+    total_prescriptions: int
+    total_medicines: int
+    prescriptions_with_alerts: int
+    needs_review: int
+    recent_prescriptions: list[RecentPrescriptionSummary]

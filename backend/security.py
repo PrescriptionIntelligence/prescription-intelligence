@@ -1,3 +1,4 @@
+import os
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
@@ -9,10 +10,16 @@ from passlib.context import CryptContext
 # SECURITY CONFIGURATION
 # =========================================================
 
-# IMPORTANT:
-# For local development this fallback is acceptable.
-# Before production deployment, set SECRET_KEY in .env.
-SECRET_KEY = "prescription-intelligence-development-secret-key"
+# SECRET_KEY MUST be set in .env for production.
+# A development fallback is provided so the server starts
+# locally without configuration, but this value must be
+# replaced before any public deployment.
+_env_secret = os.getenv("SECRET_KEY")
+SECRET_KEY = (
+    _env_secret
+    if _env_secret
+    else "prescription-intelligence-development-secret-key-change-in-production"
+)
 
 ALGORITHM = "HS256"
 

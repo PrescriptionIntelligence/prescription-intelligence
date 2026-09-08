@@ -3,21 +3,24 @@
 import Link from "next/link";
 import { FormEvent, useState } from "react";
 import { useRouter } from "next/navigation";
+import { register } from "../../lib/auth";
 
 export default function SignUpPage() {
   const router = useRouter();
 
   const [name, setName] = useState("");
   const [email, setEmail] = useState("");
+  const [pharmacyName, setPharmacyName] = useState("");
   const [password, setPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
   const [error, setError] = useState("");
+  const [loading, setLoading] = useState(false);
 
-  function handleSubmit(event: FormEvent<HTMLFormElement>) {
+  async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     setError("");
 
-    if (!name || !email || !password || !confirmPassword) {
+    if (!name || !email || !password || !confirmPassword || !pharmacyName) {
       setError("Please complete all fields.");
       return;
     }
@@ -32,15 +35,20 @@ export default function SignUpPage() {
       return;
     }
 
-    localStorage.setItem(
-      "prescription-intelligence-user",
-      JSON.stringify({
-        name,
-        email,
-      })
-    );
+    setLoading(true);
 
-    router.push("/dashboard");
+    try {
+      await register(name, email, password, pharmacyName);
+      router.push("/dashboard");
+    } catch (err) {
+      setError(
+        err instanceof Error
+          ? err.message
+          : "Registration failed. Please try again."
+      );
+    } finally {
+      setLoading(false);
+    }
   }
 
   return (
@@ -53,7 +61,6 @@ export default function SignUpPage() {
             <span className="grid h-10 w-10 place-items-center rounded-xl bg-[#17211d] text-xs font-semibold text-white">
               Rx
             </span>
-
             <div>
               <div className="text-sm font-semibold">
                 Prescription Intelligence
@@ -70,11 +77,9 @@ export default function SignUpPage() {
               <div className="text-xs font-semibold uppercase tracking-[0.18em] text-[#77847d]">
                 Get started
               </div>
-
               <h1 className="mt-3 text-3xl font-semibold tracking-[-0.04em]">
                 Create your account
               </h1>
-
               <p className="mt-2 text-sm leading-6 text-[#7b8580]">
                 Create your workspace for prescription review.
               </p>
@@ -86,12 +91,25 @@ export default function SignUpPage() {
                 <label className="mb-2 block text-xs font-medium text-[#46534c]">
                   Full name
                 </label>
-
                 <input
                   value={name}
                   onChange={(e) => setName(e.target.value)}
                   placeholder="Your name"
-                  className="w-full rounded-xl border border-[#d9e1dc] bg-[#fafcfb] px-4 py-3 text-sm outline-none focus:border-[#82988b]"
+                  disabled={loading}
+                  className="w-full rounded-xl border border-[#d9e1dc] bg-[#fafcfb] px-4 py-3 text-sm outline-none focus:border-[#82988b] disabled:opacity-60"
+                />
+              </div>
+
+              <div>
+                <label className="mb-2 block text-xs font-medium text-[#46534c]">
+                  Pharmacy / clinic name
+                </label>
+                <input
+                  value={pharmacyName}
+                  onChange={(e) => setPharmacyName(e.target.value)}
+                  placeholder="City Pharmacy"
+                  disabled={loading}
+                  className="w-full rounded-xl border border-[#d9e1dc] bg-[#fafcfb] px-4 py-3 text-sm outline-none focus:border-[#82988b] disabled:opacity-60"
                 />
               </div>
 
@@ -99,13 +117,13 @@ export default function SignUpPage() {
                 <label className="mb-2 block text-xs font-medium text-[#46534c]">
                   Email address
                 </label>
-
                 <input
                   type="email"
                   value={email}
                   onChange={(e) => setEmail(e.target.value)}
                   placeholder="you@example.com"
-                  className="w-full rounded-xl border border-[#d9e1dc] bg-[#fafcfb] px-4 py-3 text-sm outline-none focus:border-[#82988b]"
+                  disabled={loading}
+                  className="w-full rounded-xl border border-[#d9e1dc] bg-[#fafcfb] px-4 py-3 text-sm outline-none focus:border-[#82988b] disabled:opacity-60"
                 />
               </div>
 
@@ -113,13 +131,13 @@ export default function SignUpPage() {
                 <label className="mb-2 block text-xs font-medium text-[#46534c]">
                   Password
                 </label>
-
                 <input
                   type="password"
                   value={password}
                   onChange={(e) => setPassword(e.target.value)}
                   placeholder="At least 8 characters"
-                  className="w-full rounded-xl border border-[#d9e1dc] bg-[#fafcfb] px-4 py-3 text-sm outline-none focus:border-[#82988b]"
+                  disabled={loading}
+                  className="w-full rounded-xl border border-[#d9e1dc] bg-[#fafcfb] px-4 py-3 text-sm outline-none focus:border-[#82988b] disabled:opacity-60"
                 />
               </div>
 
@@ -127,13 +145,13 @@ export default function SignUpPage() {
                 <label className="mb-2 block text-xs font-medium text-[#46534c]">
                   Confirm password
                 </label>
-
                 <input
                   type="password"
                   value={confirmPassword}
                   onChange={(e) => setConfirmPassword(e.target.value)}
                   placeholder="Repeat your password"
-                  className="w-full rounded-xl border border-[#d9e1dc] bg-[#fafcfb] px-4 py-3 text-sm outline-none focus:border-[#82988b]"
+                  disabled={loading}
+                  className="w-full rounded-xl border border-[#d9e1dc] bg-[#fafcfb] px-4 py-3 text-sm outline-none focus:border-[#82988b] disabled:opacity-60"
                 />
               </div>
 
@@ -145,9 +163,10 @@ export default function SignUpPage() {
 
               <button
                 type="submit"
-                className="mt-2 w-full rounded-xl bg-[#17211d] py-3.5 text-sm font-medium text-white hover:bg-[#26332d]"
+                disabled={loading}
+                className="mt-2 w-full rounded-xl bg-[#17211d] py-3.5 text-sm font-medium text-white hover:bg-[#26332d] disabled:opacity-60 disabled:cursor-not-allowed"
               >
-                Create account →
+                {loading ? "Creating account…" : "Create account →"}
               </button>
             </form>
 
@@ -161,6 +180,11 @@ export default function SignUpPage() {
               </Link>
             </p>
           </div>
+
+          <p className="mt-6 text-center text-[11px] leading-5 text-[#929b96]">
+            Prescription Intelligence is designed to assist review workflows,
+            not replace professional judgment.
+          </p>
         </div>
       </div>
     </main>

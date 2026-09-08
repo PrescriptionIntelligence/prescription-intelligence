@@ -555,14 +555,15 @@ export default function ReviewPage() {
 
     if (storedResult) {
       try {
-        setResult(JSON.parse(storedResult));
+        const parsed = JSON.parse(storedResult);
+        Promise.resolve().then(() => setResult(parsed));
       } catch {
-        setResult(null);
+        Promise.resolve().then(() => setResult(null));
       }
     }
 
     if (storedFileName) {
-      setFileName(storedFileName);
+      Promise.resolve().then(() => setFileName(storedFileName));
     }
   }, []);
 

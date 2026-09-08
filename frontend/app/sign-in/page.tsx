@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { FormEvent, useState } from "react";
 import { useRouter } from "next/navigation";
+import { login } from "../../lib/auth";
 
 export default function SignInPage() {
   const router = useRouter();
@@ -11,8 +12,9 @@ export default function SignInPage() {
   const [password, setPassword] = useState("");
   const [showPassword, setShowPassword] = useState(false);
   const [error, setError] = useState("");
+  const [loading, setLoading] = useState(false);
 
-  function handleSubmit(event: FormEvent<HTMLFormElement>) {
+  async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     setError("");
 
@@ -21,29 +23,32 @@ export default function SignInPage() {
       return;
     }
 
-    // Temporary frontend session.
-    // This will be replaced with the FastAPI authentication request.
-    localStorage.setItem(
-      "prescription-intelligence-user",
-      JSON.stringify({
-        email,
-        name: email.split("@")[0],
-      })
-    );
+    setLoading(true);
 
-    router.push("/dashboard");
+    try {
+      await login(email, password);
+      router.push("/dashboard");
+    } catch (err) {
+      setError(
+        err instanceof Error
+          ? err.message
+          : "Sign in failed. Please try again."
+      );
+    } finally {
+      setLoading(false);
+    }
   }
 
   return (
     <main className="min-h-screen bg-[#f3f6f3] text-[#17211d]">
       <div className="mx-auto flex min-h-screen max-w-7xl">
 
+        {/* Left panel — visible on large screens */}
         <section className="hidden flex-1 flex-col justify-between p-10 lg:flex">
           <Link href="/" className="flex items-center gap-3">
             <span className="grid h-10 w-10 place-items-center rounded-xl bg-[#17211d] text-sm font-semibold text-white">
               Rx
             </span>
-
             <div>
               <div className="text-sm font-semibold">
                 Prescription Intelligence
@@ -58,14 +63,13 @@ export default function SignInPage() {
             <div className="mb-5 inline-flex rounded-full border border-[#d7e0da] bg-white px-3 py-2 text-xs text-[#627269]">
               ✦ Built around real pharmacy workflows
             </div>
-
             <h1 className="text-5xl font-semibold leading-[1.05] tracking-[-0.05em]">
               A clearer way to review every prescription.
             </h1>
-
             <p className="mt-6 max-w-md text-sm leading-6 text-[#707b75]">
-              Prescription Intelligence helps turn prescription information
-              into structured, review-ready medicine data.
+              Prescription Intelligence helps turn prescription images into
+              structured, review-ready medicine data — with confidence scoring
+              built in.
             </p>
           </div>
 
@@ -74,6 +78,7 @@ export default function SignInPage() {
           </p>
         </section>
 
+        {/* Right panel — form */}
         <section className="flex w-full items-center justify-center px-6 py-10 lg:w-[480px] lg:px-10">
           <div className="w-full max-w-sm">
 
@@ -84,7 +89,6 @@ export default function SignInPage() {
               <span className="grid h-9 w-9 place-items-center rounded-xl bg-[#17211d] text-xs font-semibold text-white">
                 Rx
               </span>
-
               <span className="text-sm font-semibold">
                 Prescription Intelligence
               </span>
@@ -96,11 +100,9 @@ export default function SignInPage() {
                 <div className="text-xs font-semibold uppercase tracking-[0.18em] text-[#77847d]">
                   Welcome back
                 </div>
-
                 <h2 className="mt-3 text-3xl font-semibold tracking-[-0.04em]">
                   Sign in
                 </h2>
-
                 <p className="mt-2 text-sm leading-6 text-[#7b8580]">
                   Continue to your prescription review workspace.
                 </p>
@@ -112,13 +114,13 @@ export default function SignInPage() {
                   <label className="mb-2 block text-xs font-medium text-[#46534c]">
                     Email address
                   </label>
-
                   <input
                     type="email"
                     value={email}
                     onChange={(e) => setEmail(e.target.value)}
                     placeholder="you@example.com"
-                    className="w-full rounded-xl border border-[#d9e1dc] bg-[#fafcfb] px-4 py-3 text-sm outline-none transition placeholder:text-[#a1aaa5] focus:border-[#82988b] focus:ring-2 focus:ring-[#e5ece7]"
+                    disabled={loading}
+                    className="w-full rounded-xl border border-[#d9e1dc] bg-[#fafcfb] px-4 py-3 text-sm outline-none transition placeholder:text-[#a1aaa5] focus:border-[#82988b] focus:ring-2 focus:ring-[#e5ece7] disabled:opacity-60"
                   />
                 </div>
 
@@ -127,7 +129,6 @@ export default function SignInPage() {
                     <label className="text-xs font-medium text-[#46534c]">
                       Password
                     </label>
-
                     <Link
                       href="/forgot-password"
                       className="text-xs text-[#627b6d] hover:text-[#17211d]"
@@ -135,16 +136,15 @@ export default function SignInPage() {
                       Forgot password?
                     </Link>
                   </div>
-
                   <div className="relative">
                     <input
                       type={showPassword ? "text" : "password"}
                       value={password}
                       onChange={(e) => setPassword(e.target.value)}
                       placeholder="Enter your password"
-                      className="w-full rounded-xl border border-[#d9e1dc] bg-[#fafcfb] px-4 py-3 pr-20 text-sm outline-none transition placeholder:text-[#a1aaa5] focus:border-[#82988b] focus:ring-2 focus:ring-[#e5ece7]"
+                      disabled={loading}
+                      className="w-full rounded-xl border border-[#d9e1dc] bg-[#fafcfb] px-4 py-3 pr-20 text-sm outline-none transition placeholder:text-[#a1aaa5] focus:border-[#82988b] focus:ring-2 focus:ring-[#e5ece7] disabled:opacity-60"
                     />
-
                     <button
                       type="button"
                       onClick={() => setShowPassword(!showPassword)}
@@ -163,10 +163,14 @@ export default function SignInPage() {
 
                 <button
                   type="submit"
-                  className="w-full rounded-xl bg-[#17211d] py-3.5 text-sm font-medium text-white transition hover:bg-[#26332d]"
+                  disabled={loading}
+                  className="w-full rounded-xl bg-[#17211d] py-3.5 text-sm font-medium text-white transition hover:bg-[#26332d] disabled:opacity-60 disabled:cursor-not-allowed"
                 >
-                  Sign in
-                  <span className="ml-2">→</span>
+                  {loading ? (
+                    "Signing in…"
+                  ) : (
+                    <>Sign in <span className="ml-1">→</span></>
+                  )}
                 </button>
               </form>
 
@@ -179,7 +183,7 @@ export default function SignInPage() {
               </div>
 
               <p className="text-center text-sm text-[#737e78]">
-                Don't have an account?{" "}
+                Don&apos;t have an account?{" "}
                 <Link
                   href="/sign-up"
                   className="font-medium text-[#344f42] hover:underline"
