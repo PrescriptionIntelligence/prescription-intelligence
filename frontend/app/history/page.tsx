@@ -240,7 +240,11 @@ export default function HistoryPage() {
                 {prescriptions.map((rx, i) => {
                   const badge = statusBadge(rx.status);
                   const confidence = avgConfidence(rx.medicines);
-                  const safetyCount = (rx.safety_flags || []).length;
+                  const safetyCount = (rx.safety_flags || []).filter(
+  (flag) =>
+    flag.type !== "ocr_extraction_failed" &&
+    flag.type !== "poor_ocr_quality"
+).length;
                   return (
                     <tr
                       key={rx.prescription_id}

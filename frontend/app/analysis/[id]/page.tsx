@@ -205,13 +205,23 @@ export default function AnalysisDetailPage() {
 
   if (!prescription) return null;
 
-  const highPriorityFlags = prescription.safety_flags.filter(
+  // OCR/extraction process warnings — not medication safety issues.
+  const OCR_FLAG_TYPES = new Set(["ocr_extraction_failed", "poor_ocr_quality"]);
+  const ocrFlags = prescription.safety_flags.filter((f) =>
+    OCR_FLAG_TYPES.has(f.type)
+  );
+  // Medication safety flags only.
+  const medicationFlags = prescription.safety_flags.filter(
+    (f) => !OCR_FLAG_TYPES.has(f.type)
+  );
+
+  const highPriorityFlags = medicationFlags.filter(
     (f) => f.severity === "high" || f.severity === "error"
   );
-  const cautionFlags = prescription.safety_flags.filter(
+  const cautionFlags = medicationFlags.filter(
     (f) => f.severity === "warning"
   );
-  const infoFlags = prescription.safety_flags.filter(
+  const infoFlags = medicationFlags.filter(
     (f) => f.severity === "info" || f.severity === "informational"
   );
 
@@ -316,7 +326,10 @@ export default function AnalysisDetailPage() {
               </div>
               <dl className="mt-4 space-y-3 text-xs">
                 <SummaryRow label="Medicines extracted" value={String(prescription.medicines.length)} />
-                <SummaryRow label="Safety flags" value={String(prescription.safety_flags.length)} />
+                <SummaryRow label="Safety flags" value={String(medicationFlags.length)} />
+                {ocrFlags.length > 0 && (
+                  <SummaryRow label="OCR / Extraction" value={String(ocrFlags.length)} />
+                )}
                 <SummaryRow label="Needs review" value={String(reviewRequired.length)} />
                 <SummaryRow label="Status" value={prescription.status} />
               </dl>
@@ -342,7 +355,7 @@ export default function AnalysisDetailPage() {
                   {tab === "medicines"
                     ? `Medicines (${prescription.medicines.length})`
                     : tab === "safety"
-                    ? `Safety (${prescription.safety_flags.length})`
+                    ? `Safety (${medicationFlags.length})`
                     : "OCR Text"}
                 </button>
               ))}
@@ -371,10 +384,25 @@ export default function AnalysisDetailPage() {
             {/* Safety tab */}
             {activeTab === "safety" && (
               <div className="space-y-4">
-                {prescription.safety_flags.length === 0 ? (
+                {/* OCR / Extraction issues — shown first, visually distinct */}
+                {ocrFlags.length > 0 && (
+                  <div>
+                    <div className="mb-3 text-xs font-semibold uppercase tracking-[0.14em] text-[#4a5a70]">
+                      OCR / Extraction
+                    </div>
+                    <div className="space-y-3">
+                      {ocrFlags.map((flag, i) => (
+                        <OcrFlagCard key={i} flag={flag} />
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {/* Medication safety flags */}
+                {medicationFlags.length === 0 ? (
                   <div className="rounded-2xl border border-[#c7dece] bg-[#f0faf4] px-8 py-10 text-center">
                     <p className="text-sm font-medium text-[#2d5a3e]">
-                      No safety flags detected
+                      No medication safety flags detected
                     </p>
                     <p className="mt-1 text-xs text-[#5a7a68]">
                       Manual pharmacist review is still required before dispensing.
@@ -559,6 +587,42 @@ function ConfidenceRow({
       <span className="w-12 text-right text-[10px] font-medium">
         {confidencePercent(value)}
       </span>
+    </div>
+  );
+}
+
+function OcrFlagCard({ flag }: { flag: SafetyFlag }) {
+  return (
+    <div className="rounded-2xl border border-[#d8e0ea] bg-[#f7f9fc] p-5">
+      <div className="flex items-start gap-3">
+        <div className="mt-0.5 grid h-8 w-8 shrink-0 place-items-center rounded-full bg-[#e8edf5] text-xs text-[#4a5a70]">
+          OCR
+        </div>
+
+        <div className="min-w-0">
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="text-sm font-medium text-[#34445a]">
+              {flag.message}
+            </span>
+
+            <span className="rounded-full bg-[#e8edf5] px-2 py-0.5 text-[10px] font-medium uppercase tracking-wide text-[#4a5a70]">
+              Extraction
+            </span>
+          </div>
+
+          {flag.medicine && (
+            <p className="mt-2 text-xs text-[#6b7888]">
+              Related text:{" "}
+              <span className="font-mono">{flag.medicine}</span>
+            </p>
+          )}
+
+          <p className="mt-2 text-xs leading-5 text-[#7a8794]">
+            This indicates an OCR or extraction limitation. Verify the
+            prescription image and manually confirm the extracted information.
+          </p>
+        </div>
+      </div>
     </div>
   );
 }

@@ -3,7 +3,65 @@ import re
 from backend.services.medicine_normalizer import (
     normalize_medicine_candidate,
     load_medicine_vocabulary,
+    _clean_text,
+    _prepare_candidate,
+    _estimate_best_score,
+    FUZZY_MATCH_THRESHOLD,
 )
+
+
+# =========================================================
+# Helper: Bare medicine line detection
+# =========================================================
+
+# Matches a digit sequence anywhere on the line — with or without a
+# trailing unit attached (e.g. "40mg", "200", "4.8").  The leading
+# word-boundary keeps us from matching digits embedded mid-word.
+_NUMERIC_RE = re.compile(r"\b\d+(?:\.\d+)?")
+
+
+def _is_bare_medicine_line(line: str, vocabulary: list[dict]) -> bool:
+    """
+    Return True when a line has no dosage-form prefix and no leading
+    number, yet is still a plausible prescription medicine line.
+
+    Two independent gates must BOTH pass:
+
+    Gate A — vocabulary score ≥ FUZZY_MATCH_THRESHOLD (0.85)
+        The first meaningful token(s) must fuzzy-match a term in the
+        medicine vocabulary at the same threshold the normalizer uses.
+        This rejects arbitrary English sentences, metadata ("Patient",
+        "Date", "Weight", "Dispense", "Day"), and garbled OCR.
+
+    Gate B — a numeric value is present on the line
+        A prescription line always includes a dose, strength, or
+        quantity.  Requiring a number prevents medicine names that
+        appear in non-prescription contexts (e.g. "Paracetamol allergy
+        noted", "Continue Pantoprazole as before") from becoming blocks.
+
+    Examples that pass  : "Azithromycin 200 og/ smb"
+                          "Pantoprazole 40mg once daily"
+                          "Cetirizine 10 mg at night"
+    Examples that fail  : "Patient 25 years old"       (score 0.62)
+                          "Paracetamol allergy noted"  (no numeric)
+                          "Day 2 4.8 mL"               (score 0.30)
+                          "xyz### @!@ 111"              (score 0.29)
+    """
+
+    if not line:
+        return False
+
+    # Gate B first — cheapest check.
+    if not _NUMERIC_RE.search(line):
+        return False
+
+    # Gate A — vocabulary fuzzy match.
+    candidate = _prepare_candidate(_clean_text(line))
+    if not candidate:
+        return False
+
+    score = _estimate_best_score(candidate, vocabulary)
+    return score >= FUZZY_MATCH_THRESHOLD
 
 
 # =========================================================
@@ -450,7 +508,10 @@ def _is_numbered_medicine_line(line: str) -> bool:
 # Helper: Split prescription blocks
 # =========================================================
 
-def _split_prescription_blocks(raw_text: str) -> list[str]:
+def _split_prescription_blocks(
+    raw_text: str,
+    vocabulary: list[dict] | None = None,
+) -> list[str]:
     """
     Convert OCR text into logical medicine blocks.
 
@@ -462,8 +523,15 @@ def _split_prescription_blocks(raw_text: str) -> list[str]:
       final medicine.
     - Preserves unknown lines inside an active medicine block.
     - Supports numbered multi-line prescriptions.
+    - Supports bare medicine lines (e.g. handwritten without
+      prefix or number) when they pass the vocabulary gate.
     - Supports simple semicolon-separated entries.
+
+    ``vocabulary`` is accepted from the caller to avoid
+    reloading it; if omitted it is loaded here.
     """
+    if vocabulary is None:
+        vocabulary = load_medicine_vocabulary()
 
     if not raw_text:
         return []
@@ -537,8 +605,22 @@ def _split_prescription_blocks(raw_text: str) -> list[str]:
             if _is_non_medicine_line(line):
                 continue
 
-            # Don't immediately turn arbitrary OCR text
-            # into a medicine block.
+            # Bare medicine line — passes vocabulary + numeric gates.
+            # e.g. "Azithromycin 200 og/ smb" (handwritten, noisy OCR)
+            if _is_bare_medicine_line(line, vocabulary):
+
+                if current_block:
+                    blocks.append(
+                        "\n".join(current_block)
+                    )
+
+                current_block = [line]
+                # Do NOT set started_numbered_mode — subsequent lines
+                # should still be attached via the block-append path.
+                continue
+
+            # Everything else (arbitrary text, headers not caught
+            # above) is dropped before the first recognised entry.
             continue
 
         # -------------------------------------------------
@@ -619,7 +701,12 @@ def _split_prescription_blocks(raw_text: str) -> list[str]:
             )
         )
 
-        if looks_numbered or looks_legacy:
+        looks_bare = _is_bare_medicine_line(
+            first_line,
+            vocabulary,
+        )
+
+        if looks_numbered or looks_legacy or looks_bare:
             final_blocks.append(block)
 
     return final_blocks
@@ -1147,7 +1234,8 @@ def extract_medicines(raw_text: str) -> list[dict]:
     # -----------------------------------------------------
 
     blocks = _split_prescription_blocks(
-        raw_text
+        raw_text,
+        vocabulary=medicine_vocabulary,
     )
 
     # -----------------------------------------------------

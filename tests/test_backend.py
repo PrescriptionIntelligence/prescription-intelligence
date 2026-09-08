@@ -532,6 +532,216 @@ class TestPrescriptionPipeline:
 
 
 # =========================================================
+# Bare medicine line detection + noisy OCR regression tests
+# =========================================================
+
+from backend.services.prescription_parser import (
+    _is_bare_medicine_line,
+    _split_prescription_blocks,
+    extract_medicines,
+)
+from backend.services.medicine_normalizer import load_medicine_vocabulary
+
+
+class TestBareMedicineLine:
+    """Unit tests for the _is_bare_medicine_line() helper."""
+
+    @pytest.fixture(scope="class")
+    def vocab(self):
+        return load_medicine_vocabulary()
+
+    # ---- lines that MUST pass ----
+
+    def test_noisy_azithromycin_passes(self, vocab):
+        assert _is_bare_medicine_line("Azithromycin 200 og/ smb", vocab) is True
+
+    def test_bare_pantoprazole_with_strength_passes(self, vocab):
+        assert _is_bare_medicine_line("Pantoprazole 40mg once daily", vocab) is True
+
+    def test_bare_paracetamol_passes(self, vocab):
+        assert _is_bare_medicine_line("Paracetamol 500mg twice daily", vocab) is True
+
+    def test_bare_cetirizine_passes(self, vocab):
+        assert _is_bare_medicine_line("Cetirizine 10 mg at night", vocab) is True
+
+    def test_alias_pcm_passes(self, vocab):
+        # PCM is an alias for Paracetamol in the vocabulary
+        assert _is_bare_medicine_line("PCM 500 twice daily", vocab) is True
+
+    # ---- lines that MUST be rejected ----
+
+    def test_patient_metadata_rejected(self, vocab):
+        assert _is_bare_medicine_line("Patient 25 years old", vocab) is False
+
+    def test_weight_metadata_rejected(self, vocab):
+        assert _is_bare_medicine_line("Weight 65 kg", vocab) is False
+
+    def test_day_instruction_rejected(self, vocab):
+        assert _is_bare_medicine_line("Day 2 4.8 mL", vocab) is False
+
+    def test_dispense_instruction_rejected(self, vocab):
+        assert _is_bare_medicine_line("Dispense s mg/mL solution, 390 mL", vocab) is False
+
+    def test_date_metadata_rejected(self, vocab):
+        assert _is_bare_medicine_line("Date 12/05/2024", vocab) is False
+
+    def test_garbled_rejected(self, vocab):
+        assert _is_bare_medicine_line("xyz### @!@ 111", vocab) is False
+
+    def test_medicine_name_without_number_rejected(self, vocab):
+        # "Paracetamol allergy noted" scores 1.0 in vocabulary but has no numeric
+        assert _is_bare_medicine_line("Paracetamol allergy noted", vocab) is False
+
+    def test_continue_medicine_without_number_rejected(self, vocab):
+        # "Continue Pantoprazole as before" — medicine name present, no number
+        assert _is_bare_medicine_line("Continue Pantoprazole as before", vocab) is False
+
+    def test_empty_line_rejected(self, vocab):
+        assert _is_bare_medicine_line("", vocab) is False
+
+    def test_none_equivalent_rejected(self, vocab):
+        assert _is_bare_medicine_line("   ", vocab) is False
+
+
+class TestNoisyHandwrittenPipeline:
+    """
+    Integration tests: noisy/handwritten prescriptions that lack the
+    standard numbered or dosage-form-prefix format.
+    """
+
+    def test_noisy_azithromycin_produces_one_medicine(self):
+        """
+        Core regression: the handwritten OCR sample must surface
+        Azithromycin rather than returning an empty medicines list.
+        """
+        raw = (
+            "Azithromycin 200 og/ smb\n"
+            "Day i is ah\n"
+            "Day 2 4.8 mL\n"
+            "Dispense s mg/mL solution, 390 mL"
+        )
+        result = process_prescription(raw)
+        assert len(result["medicines"]) == 1
+
+    def test_noisy_azithromycin_name_contains_azithromycin(self):
+        """The resolved or raw name must refer to Azithromycin."""
+        raw = (
+            "Azithromycin 200 og/ smb\n"
+            "Day i is ah\n"
+            "Day 2 4.8 mL"
+        )
+        result = process_prescription(raw)
+        med = result["medicines"][0]
+        # The normalizer may return the brand name "Azithral" or the
+        # generic "Azithromycin".  Either is acceptable — what matters
+        # is that the medicine was identified, not silently dropped.
+        name_text = " ".join([
+            med.get("name") or "",
+            med.get("generic_name") or "",
+            med.get("matched_term") or "",
+        ]).lower()
+        assert "azithromycin" in name_text or "azithral" in name_text
+
+    def test_noisy_azithromycin_has_low_extraction_confidence(self):
+        """
+        OCR noise must reduce extraction_confidence.
+        The noisy line cannot match the clean strength regex so
+        _parse_prescription_block assigns extraction_confidence=0.65.
+        """
+        raw = (
+            "Azithromycin 200 og/ smb\n"
+            "Day i is ah\n"
+            "Day 2 4.8 mL"
+        )
+        result = process_prescription(raw)
+        med = result["medicines"][0]
+        assert med["extraction_confidence"] <= 0.70
+
+    def test_noisy_azithromycin_no_ocr_extraction_failed_flag(self):
+        """
+        Once the candidate is surfaced, ocr_extraction_failed must
+        NOT appear — that flag means no medicine was found at all.
+        """
+        raw = (
+            "Azithromycin 200 og/ smb\n"
+            "Day i is ah\n"
+            "Day 2 4.8 mL"
+        )
+        result = process_prescription(raw)
+        flag_types = [f["type"] for f in result["safety_flags"]]
+        assert "ocr_extraction_failed" not in flag_types
+
+    def test_bare_pantoprazole_produces_medicine(self):
+        """Bare 'Pantoprazole 40mg' (no Tab prefix, no number) must work."""
+        result = process_prescription("Pantoprazole 40mg once daily")
+        assert len(result["medicines"]) == 1
+
+    def test_printed_tab_prefix_unchanged(self):
+        """Existing Tab-prefixed path must still work after the change."""
+        result = process_prescription("Tab Paracetamol 500mg twice daily")
+        assert len(result["medicines"]) == 1
+        assert result["medicines"][0]["needs_review"] is False
+
+    def test_numbered_prescription_unchanged(self):
+        """Existing numbered path must still work after the change."""
+        result = process_prescription(
+            "1. Azithromycin 500mg\n"
+            "Frequency: once daily"
+        )
+        assert len(result["medicines"]) == 1
+
+    def test_garbled_text_still_zero_medicines(self):
+        """Completely unreadable OCR must still produce no medicines."""
+        result = process_prescription("xyz### @!@ 111")
+        assert result["medicines"] == []
+
+    def test_metadata_lines_produce_no_medicines(self):
+        """
+        A block of metadata lines must not be mistaken for medicines
+        even though some contain numbers.
+        """
+        raw = (
+            "Patient 25 years old\n"
+            "Weight 65 kg\n"
+            "Date 12/05/2024"
+        )
+        result = process_prescription(raw)
+        assert result["medicines"] == []
+
+    def test_medicine_in_allergy_context_not_extracted(self):
+        """
+        A medicine name appearing in a non-prescription sentence
+        (no numeric) must not be extracted as a medicine.
+        """
+        result = process_prescription("Paracetamol allergy noted")
+        assert result["medicines"] == []
+
+    def test_split_blocks_numbered_still_one_block(self):
+        vocab = load_medicine_vocabulary()
+        blocks = _split_prescription_blocks(
+            "1. Cetirizine 10mg\nDose: 1 tablet",
+            vocabulary=vocab,
+        )
+        assert len(blocks) == 1
+
+    def test_split_blocks_bare_medicine_one_block(self):
+        vocab = load_medicine_vocabulary()
+        blocks = _split_prescription_blocks(
+            "Azithromycin 200 og/ smb\nDay i is ah",
+            vocabulary=vocab,
+        )
+        assert len(blocks) == 1
+
+    def test_split_blocks_garbled_zero_blocks(self):
+        vocab = load_medicine_vocabulary()
+        blocks = _split_prescription_blocks(
+            "xyz### @!@ 111",
+            vocabulary=vocab,
+        )
+        assert len(blocks) == 0
+
+
+# =========================================================
 # OCR text scoring (unit test, no Tesseract needed)
 # =========================================================
 
