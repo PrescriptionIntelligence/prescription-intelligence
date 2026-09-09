@@ -142,10 +142,24 @@ class PrescriptionUploadResponse(BaseModel):
     stored_filename: Optional[str] = None
     status: str
     raw_text: Optional[str] = None
-    medicines: list[MedicineBase] = Field(default_factory=list)
-    safety_flags: list[Any] = Field(default_factory=list)
+
+    # Core extracted medicine results
+    medicines: list[MedicineBase] = Field(
+        default_factory=list
+    )
+
+    # Legacy / flattened safety flags
+    safety_flags: list[Any] = Field(
+        default_factory=list
+    )
+
+    # OCR and confidence metadata
     analysis_metadata: Optional[dict] = None
 
+    # Detailed prescription intelligence
+    interpretation: Optional[dict] = None
+    prescription_plan: Optional[dict] = None
+    safety_analysis: Optional[dict] = None
 
 # ---------------------------------------------------------
 # Dashboard

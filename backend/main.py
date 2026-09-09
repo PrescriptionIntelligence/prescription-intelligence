@@ -431,7 +431,26 @@ async def upload_prescription(
 
     medicines = analysis.get("medicines", [])
     safety_flags = analysis.get("safety_flags", [])
-    analysis_metadata = analysis.get("analysis_metadata", {})
+    analysis_metadata = analysis.get(
+        "analysis_metadata",
+        {},
+    )
+
+    interpretation = analysis.get(
+        "interpretation",
+        {},
+    )
+
+    prescription_plan = analysis.get(
+        "prescription_plan",
+        {},
+    )
+
+    safety_analysis = analysis.get(
+        "safety_analysis",
+        {},
+    )
+
 
     prescription_id = f"RX-{file_id.hex[:8].upper()}"
 
@@ -507,6 +526,9 @@ async def upload_prescription(
         "medicines": medicines,
         "safety_flags": safety_flags,
         "analysis_metadata": analysis_metadata,
+        "interpretation": interpretation,
+        "prescription_plan": prescription_plan,
+        "safety_analysis": safety_analysis,
     }
 
 
