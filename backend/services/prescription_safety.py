@@ -103,13 +103,30 @@ def _check_strength(
 # ---------------------------------------------------------
 
 def _check_instructions(
-    instructions: dict,
+    medicine_plan: dict,
 ) -> list[dict]:
     """
     Flag incomplete or uncertain medication instructions.
+
+    The prescription plan is the source of truth here.
+
+    The plan builder combines:
+        - parser-extracted structured fields
+        - instruction interpretation
+        - medicine resolution
+
+    Therefore the safety analyzer should evaluate the
+    complete medicine plan rather than expecting the
+    instruction sub-dictionary to contain plan-level
+    review state.
     """
 
     issues = []
+
+    instructions = medicine_plan.get(
+        "instructions",
+        {},
+    )
 
     if not instructions:
         return [
@@ -123,10 +140,15 @@ def _check_instructions(
             }
         ]
 
-    if instructions.get(
-        "needs_review",
-        True,
-    ):
+    # -----------------------------------------------------
+    # Plan-level review state
+    # -----------------------------------------------------
+
+    plan_needs_review = medicine_plan.get(
+        "needs_review"
+    )
+
+    if plan_needs_review is True:
 
         issues.append(
             {
@@ -138,6 +160,10 @@ def _check_instructions(
                 ),
             }
         )
+
+    # -----------------------------------------------------
+    # Required instruction fields
+    # -----------------------------------------------------
 
     quantity = instructions.get(
         "quantity"
@@ -180,6 +206,10 @@ def _check_instructions(
                 ),
             }
         )
+
+    # Duration and route remain informational/low-severity
+    # when they are genuinely absent. They do not by
+    # themselves make an otherwise resolved plan unsafe.
 
     if duration is None:
 
@@ -313,11 +343,6 @@ def analyze_medicine_plan(
         {},
     )
 
-    instructions = medicine_plan.get(
-        "instructions",
-        {},
-    )
-
     issues = []
 
     issues.extend(
@@ -334,7 +359,7 @@ def analyze_medicine_plan(
 
     issues.extend(
         _check_instructions(
-            instructions
+            medicine_plan
         )
     )
 

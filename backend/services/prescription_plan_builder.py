@@ -10,11 +10,13 @@ This layer does NOT:
     - alter the doctor's instructions
     - invent missing information
 
-It organizes the output of the AI/ML + rule-based pipeline
-into a form that can later be consumed by the API/UI.
+It organizes information already extracted by the prescription
+pipeline and combines it with the medicine resolution layer.
 """
 
 from __future__ import annotations
+
+import re
 
 from backend.services.instruction_text_extractor import (
     extract_instruction_text,
@@ -36,6 +38,331 @@ def _safe_float(value) -> float:
         return 0.0
 
 
+def _is_positive_number(value) -> bool:
+    try:
+        return float(value) > 0
+    except (TypeError, ValueError):
+        return False
+
+
+def _normalize_resolution_status(status: str | None) -> str:
+    """
+    Normalize medicine-resolution status into the canonical
+    plan-level vocabulary.
+
+    The medicine interpreter may use 'accepted', while the
+    plan/safety layers use 'resolved'.
+
+    Canonical values:
+        resolved
+        needs_review
+        unknown
+    """
+
+    if status in {
+        "accepted",
+        "resolved",
+    }:
+        return "resolved"
+
+    if status in {
+        "needs_review",
+        "review_required",
+        "partially_resolved",
+    }:
+        return "needs_review"
+
+    return "unknown"
+
+
+def _extract_quantity_from_raw_text(
+    text: str,
+) -> int | float | None:
+    """
+    Recover an explicit dosage quantity from the original
+    prescription text.
+
+    Examples:
+        1 tablet
+        2 tablets
+        0.5 tablet
+        half tablet
+    """
+
+    if not text:
+        return None
+
+    match = re.search(
+        r"\b(\d+(?:\.\d+)?)\s*"
+        r"(tablet|tablets|tab|tabs|capsule|capsules|cap|caps)\b",
+        text,
+        flags=re.IGNORECASE,
+    )
+
+    if match:
+        value = float(match.group(1))
+
+        if value.is_integer():
+            return int(value)
+
+        return value
+
+    if re.search(
+        r"\bhalf\s*(tablet|tab|capsule|cap)\b",
+        text,
+        flags=re.IGNORECASE,
+    ):
+        return 0.5
+
+    return None
+
+
+def _extract_dose_unit_from_raw_text(
+    text: str,
+) -> str | None:
+    """
+    Recover the unit associated with an explicit dosage
+    quantity in the original prescription text.
+    """
+
+    if not text:
+        return None
+
+    match = re.search(
+        r"\b\d+(?:\.\d+)?\s*"
+        r"(tablet|tablets|tab|tabs|capsule|capsules|cap|caps)\b",
+        text,
+        flags=re.IGNORECASE,
+    )
+
+    if not match:
+        if re.search(
+            r"\bhalf\s*(tablet|tab|capsule|cap)\b",
+            text,
+            flags=re.IGNORECASE,
+        ):
+            return "tablet"
+
+        return None
+
+    unit = match.group(1).lower()
+
+    if unit in {"tab", "tabs", "tablet", "tablets"}:
+        return "tablet"
+
+    if unit in {"cap", "caps", "capsule", "capsules"}:
+        return "capsule"
+
+    return unit
+
+
+def _infer_dosage_form(
+    medicine_result: dict,
+    top_hypothesis: dict,
+) -> str | None:
+    """
+    Determine dosage form using prescription evidence first.
+
+    Explicit prescription information takes precedence over
+    knowledge-base information.
+    """
+
+    explicit_unit = (
+        medicine_result.get("dose_unit")
+    )
+
+    if explicit_unit:
+        normalized = str(
+            explicit_unit
+        ).strip().lower()
+
+        if normalized in {
+            "tablet",
+            "tablets",
+            "tab",
+            "tabs",
+        }:
+            return "Tablet"
+
+        if normalized in {
+            "capsule",
+            "capsules",
+            "cap",
+            "caps",
+        }:
+            return "Capsule"
+
+        return str(
+            explicit_unit
+        ).strip()
+
+    raw_text = medicine_result.get(
+        "raw_text",
+        "",
+    )
+
+    raw_unit = _extract_dose_unit_from_raw_text(
+        raw_text
+    )
+
+    if raw_unit:
+        if raw_unit == "tablet":
+            return "Tablet"
+
+        if raw_unit == "capsule":
+            return "Capsule"
+
+        return raw_unit
+
+    # Only use knowledge-base dosage form when the
+    # prescription did not explicitly provide one.
+    return top_hypothesis.get(
+        "dosage_form"
+    )
+
+
+def _resolve_quantity(
+    medicine_result: dict,
+    instruction: dict,
+) -> int | float | None:
+    """
+    Preserve quantity from the strongest available source.
+
+    Priority:
+        1. structured extraction
+        2. instruction interpreter
+        3. original raw prescription text
+    """
+
+    extracted_quantity = medicine_result.get(
+        "dose_value"
+    )
+
+    if _is_positive_number(
+        extracted_quantity
+    ):
+        return extracted_quantity
+
+    interpreted_quantity = instruction.get(
+        "quantity"
+    )
+
+    if _is_positive_number(
+        interpreted_quantity
+    ):
+        return interpreted_quantity
+
+    return _extract_quantity_from_raw_text(
+        medicine_result.get(
+            "raw_text",
+            "",
+        )
+    )
+
+
+def _resolve_route(
+    medicine_result: dict,
+    instruction: dict,
+) -> str | None:
+    """
+    Preserve route information already extracted upstream.
+
+    Priority:
+        1. structured extraction
+        2. instruction interpreter
+    """
+
+    extracted_route = medicine_result.get(
+        "route"
+    )
+
+    if extracted_route:
+        return extracted_route
+
+    return instruction.get(
+        "route"
+    )
+
+
+def _resolve_frequency(
+    medicine_result: dict,
+    instruction: dict,
+) -> str | None:
+    """
+    Preserve structured frequency extraction when available.
+    """
+
+    extracted_frequency = medicine_result.get(
+        "frequency_value"
+    )
+
+    extracted_frequency_unit = medicine_result.get(
+        "frequency_unit"
+    )
+
+    if (
+        extracted_frequency is not None
+        and extracted_frequency_unit
+    ):
+        try:
+            numeric_frequency = float(
+                extracted_frequency
+            )
+
+            if numeric_frequency == 1:
+                return "once_daily"
+
+            if numeric_frequency == 2:
+                return "twice_daily"
+
+            if numeric_frequency == 3:
+                return "three_times_daily"
+
+            if numeric_frequency == 4:
+                return "four_times_daily"
+
+        except (TypeError, ValueError):
+            pass
+
+    return instruction.get(
+        "frequency"
+    )
+
+
+def _resolve_duration(
+    medicine_result: dict,
+    instruction: dict,
+) -> dict | None:
+    """
+    Preserve structured duration extraction when available.
+    """
+
+    extracted_value = medicine_result.get(
+        "duration_value"
+    )
+
+    extracted_unit = medicine_result.get(
+        "duration_unit"
+    )
+
+    if (
+        extracted_value is not None
+        and extracted_unit
+    ):
+        return {
+            "value": extracted_value,
+            "unit": extracted_unit,
+            "text": (
+                f"{extracted_value} "
+                f"{extracted_unit}"
+            ),
+        }
+
+    return instruction.get(
+        "duration"
+    )
+
+
 # ---------------------------------------------------------
 # Build one medicine plan
 # ---------------------------------------------------------
@@ -46,16 +373,6 @@ def build_medicine_plan(
     """
     Combine one interpreted medicine result with its
     medication instructions.
-
-    Expected input:
-
-        {
-            "raw_text": ...,
-            "medicine_text": ...,
-            "ocr_confidence": ...,
-            "candidate_score": ...,
-            "resolution": ...
-        }
     """
 
     raw_text = medicine_result.get(
@@ -68,25 +385,37 @@ def build_medicine_plan(
         {},
     )
 
-    # -----------------------------------------------------
-    # Extract instruction text from the original item.
-    # -----------------------------------------------------
+    if not isinstance(
+        resolution,
+        dict,
+    ):
+        resolution = {}
 
-    instruction_extraction = (
-        extract_instruction_text(
-            raw_text
-        )
+    top_hypothesis = resolution.get(
+        "top_hypothesis"
     )
 
-    instruction_text = (
-        instruction_extraction.get(
-            "instruction_text",
-            "",
-        )
+    if not isinstance(
+        top_hypothesis,
+        dict,
+    ):
+        top_hypothesis = {}
+
+    # -----------------------------------------------------
+    # Extract instruction text
+    # -----------------------------------------------------
+
+    instruction_extraction = extract_instruction_text(
+        raw_text
+    )
+
+    instruction_text = instruction_extraction.get(
+        "instruction_text",
+        "",
     )
 
     # -----------------------------------------------------
-    # Interpret the extracted instruction.
+    # Interpret instructions
     # -----------------------------------------------------
 
     if instruction_text:
@@ -111,39 +440,104 @@ def build_medicine_plan(
         }
 
     # -----------------------------------------------------
-    # Medicine resolution
+    # Preserve structured extraction
     # -----------------------------------------------------
 
-    top_hypothesis = resolution.get(
-        "top_hypothesis"
+    quantity = _resolve_quantity(
+        medicine_result,
+        instruction,
     )
 
-    if top_hypothesis is None:
-        top_hypothesis = {}
+    frequency = _resolve_frequency(
+        medicine_result,
+        instruction,
+    )
+
+    duration = _resolve_duration(
+        medicine_result,
+        instruction,
+    )
+
+    route = _resolve_route(
+        medicine_result,
+        instruction,
+    )
+
+    dosage_form = _infer_dosage_form(
+        medicine_result,
+        top_hypothesis,
+    )
 
     # -----------------------------------------------------
-    # Overall review state
-    #
-    # A plan requires review if either:
-    #
-    #   medicine resolution needs review
-    #   OR
-    #   instruction interpretation needs review
+    # Canonical medicine resolution
+    # -----------------------------------------------------
+
+    raw_resolution_status = resolution.get(
+        "status"
+    )
+
+    medicine_status = _normalize_resolution_status(
+        raw_resolution_status
+    )
+
+    # -----------------------------------------------------
+    # Determine whether medicine identification needs review
     # -----------------------------------------------------
 
     medicine_needs_review = (
-        resolution.get(
-            "status"
-        )
-        != "resolved"
+        medicine_status != "resolved"
     )
 
-    instruction_needs_review = bool(
-        instruction.get(
-            "needs_review",
-            True,
+    # -----------------------------------------------------
+    # Determine whether instructions need review
+    #
+    # Missing optional information such as timing,
+    # food relationship, or route should not automatically
+    # make a complete instruction unsafe.
+    #
+    # Critical instruction signals are:
+    #   - quantity
+    #   - frequency
+    #   - duration when explicitly supplied
+    #
+    # Route is preserved when available.
+    # -----------------------------------------------------
+
+    has_quantity = (
+        quantity is not None
+    )
+
+    has_frequency = (
+        frequency is not None
+    )
+
+    has_duration = (
+        duration is not None
+    )
+
+    instruction_text_present = bool(
+        instruction_text.strip()
+    )
+
+    instruction_needs_review = (
+        not instruction_text_present
+        or not has_quantity
+        or not has_frequency
+    )
+
+    # If the original prescription explicitly contained
+    # duration information, it should also survive into
+    # the structured plan.
+    raw_duration_present = bool(
+        re.search(
+            r"\b\d+\s*(day|days|week|weeks|month|months)\b",
+            raw_text,
+            flags=re.IGNORECASE,
         )
     )
+
+    if raw_duration_present and not has_duration:
+        instruction_needs_review = True
 
     needs_review = (
         medicine_needs_review
@@ -151,10 +545,7 @@ def build_medicine_plan(
     )
 
     # -----------------------------------------------------
-    # Combined confidence
-    #
-    # We intentionally use the weaker component rather
-    # than averaging away uncertainty.
+    # Confidence
     # -----------------------------------------------------
 
     medicine_confidence = _safe_float(
@@ -174,7 +565,34 @@ def build_medicine_plan(
         )
     )
 
-    if medicine_confidence > 0 and instruction_confidence > 0:
+    # Structured extraction can strengthen the instruction
+    # interpretation when the interpreter had lost a signal
+    # while processing the shortened instruction text.
+    structured_signal_count = sum(
+        value is not None
+        for value in [
+            quantity,
+            frequency,
+            duration,
+            route,
+        ]
+    )
+
+    if structured_signal_count >= 4:
+        instruction_confidence = max(
+            instruction_confidence,
+            0.90,
+        )
+    elif structured_signal_count >= 3:
+        instruction_confidence = max(
+            instruction_confidence,
+            0.80,
+        )
+
+    if (
+        medicine_confidence > 0
+        and instruction_confidence > 0
+    ):
 
         overall_confidence = min(
             medicine_confidence,
@@ -216,14 +634,9 @@ def build_medicine_plan(
                 "strength_unit"
             ),
 
-            "dosage_form": top_hypothesis.get(
-                "dosage_form"
-            ),
+            "dosage_form": dosage_form,
 
-            "status": resolution.get(
-                "status",
-                "needs_review",
-            ),
+            "status": medicine_status,
 
             "alternatives": resolution.get(
                 "alternatives",
@@ -239,13 +652,9 @@ def build_medicine_plan(
 
             "instruction_text": instruction_text,
 
-            "quantity": instruction.get(
-                "quantity"
-            ),
+            "quantity": quantity,
 
-            "frequency": instruction.get(
-                "frequency"
-            ),
+            "frequency": frequency,
 
             "timing": instruction.get(
                 "timing"
@@ -255,13 +664,9 @@ def build_medicine_plan(
                 "food_relation"
             ),
 
-            "duration": instruction.get(
-                "duration"
-            ),
+            "duration": duration,
 
-            "route": instruction.get(
-                "route"
-            ),
+            "route": route,
         },
 
         "confidence": round(

@@ -11,6 +11,7 @@ Its job is to:
     - resolve each candidate safely
     - summarize confidence
     - identify medicines requiring pharmacist review
+    - preserve structured prescription instructions
     - preserve alternative hypotheses
 """
 
@@ -48,7 +49,8 @@ def _determine_prescription_status(
         no_medicines_detected
 
     Important:
-        "accepted" refers to medicine identity resolution.
+        "accepted" refers only to medicine identity
+        resolution.
 
         It does NOT mean that the prescription is clinically
         safe, appropriate, or free from drug interactions.
@@ -111,6 +113,11 @@ def interpret_medicine_candidate(
         evidence fusion
             ↓
         safe resolution
+
+    Important:
+        Structured prescription fields extracted by the
+        parser are intentionally preserved here so that
+        downstream plan and safety layers do not lose them.
     """
 
     hypotheses = get_ranked_medicine_hypotheses(
@@ -128,6 +135,10 @@ def interpret_medicine_candidate(
     )
 
     return {
+        # -------------------------------------------------
+        # Original text
+        # -------------------------------------------------
+
         "raw_text": candidate.get(
             "text",
             "",
@@ -137,6 +148,10 @@ def interpret_medicine_candidate(
             "medicine_text",
             "",
         ),
+
+        # -------------------------------------------------
+        # Confidence
+        # -------------------------------------------------
 
         "ocr_confidence": round(
             float(
@@ -158,6 +173,108 @@ def interpret_medicine_candidate(
             3,
         ),
 
+        # -------------------------------------------------
+        # Preserve structured medicine information
+        # -------------------------------------------------
+
+        "name": candidate.get(
+            "name"
+        ),
+
+        "generic_name": candidate.get(
+            "generic_name"
+        ),
+
+        "brand_name": candidate.get(
+            "brand_name"
+        ),
+
+        "strength_value": candidate.get(
+            "strength_value"
+        ),
+
+        "strength_unit": candidate.get(
+            "strength_unit"
+        ),
+
+        "strength_components": candidate.get(
+            "strength_components",
+            [],
+        ),
+
+        # -------------------------------------------------
+        # Prescription instruction fields
+        # -------------------------------------------------
+
+        "dose_value": candidate.get(
+            "dose_value"
+        ),
+
+        "dose_unit": candidate.get(
+            "dose_unit"
+        ),
+
+        "route": candidate.get(
+            "route"
+        ),
+
+        "frequency_value": candidate.get(
+            "frequency_value"
+        ),
+
+        "frequency_unit": candidate.get(
+            "frequency_unit"
+        ),
+
+        "duration_value": candidate.get(
+            "duration_value"
+        ),
+
+        "duration_unit": candidate.get(
+            "duration_unit"
+        ),
+
+        "instructions": candidate.get(
+            "instructions"
+        ),
+
+        # -------------------------------------------------
+        # Calculated information
+        # -------------------------------------------------
+
+        "daily_dose_value": candidate.get(
+            "daily_dose_value"
+        ),
+
+        "daily_dose_unit": candidate.get(
+            "daily_dose_unit"
+        ),
+
+        "daily_dose_components": candidate.get(
+            "daily_dose_components",
+            [],
+        ),
+
+        "extraction_confidence": candidate.get(
+            "extraction_confidence"
+        ),
+
+        "normalization_confidence": candidate.get(
+            "normalization_confidence"
+        ),
+
+        "confidence": candidate.get(
+            "confidence"
+        ),
+
+        "needs_review": candidate.get(
+            "needs_review"
+        ),
+
+        # -------------------------------------------------
+        # Resolution
+        # -------------------------------------------------
+
         "resolution": resolution,
     }
 
@@ -175,7 +292,9 @@ def interpret_prescription(
 
     This is the main entry point for the interpreter.
 
-    The interpreter focuses on medicine identity resolution.
+    The interpreter focuses on medicine identity resolution
+    while preserving structured prescription information.
+
     Clinical safety checks such as drug interactions,
     dose limits, and other safety rules are handled by
     separate safety-analysis layers.
