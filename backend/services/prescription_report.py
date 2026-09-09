@@ -38,6 +38,9 @@ ISSUE_LABELS = {
     "instructions_uncertain": (
         "Medication instructions require review"
     ),
+    "instructions_missing": (
+        "Medication instructions are missing"
+    ),
     "quantity_missing": (
         "Quantity could not be determined"
     ),
@@ -50,6 +53,69 @@ ISSUE_LABELS = {
     "route_missing": (
         "Route could not be determined"
     ),
+    "strength_missing": (
+        "Medicine strength is missing"
+    ),
+    "missing_strength": (
+        "Medicine strength is missing"
+    ),
+    "missing_medicine_name": (
+        "Medicine name could not be identified"
+    ),
+    "missing_dose": (
+        "Dose could not be determined"
+    ),
+    "missing_frequency": (
+        "Frequency could not be determined"
+    ),
+    "invalid_strength": (
+        "Medicine strength is invalid"
+    ),
+    "invalid_dose": (
+        "Medicine dose is invalid"
+    ),
+    "invalid_frequency": (
+        "Medicine frequency is invalid"
+    ),
+    "invalid_daily_dose": (
+        "Calculated daily dose is invalid"
+    ),
+    "daily_dose_not_calculated": (
+        "Daily dose could not be calculated"
+    ),
+    "invalid_daily_dose_components": (
+        "Calculated daily-dose components are invalid"
+    ),
+    "low_extraction_confidence": (
+        "Medicine extraction confidence is low"
+    ),
+    "low_normalization_confidence": (
+        "Medicine normalization confidence is low"
+    ),
+    "low_confidence": (
+        "Overall confidence is low"
+    ),
+    "ambiguous_medicine": (
+        "Medicine identification is ambiguous"
+    ),
+    "low_identification_confidence": (
+        "Medicine identification confidence is low"
+    ),
+    "duplicate_medicine": (
+        "Duplicate medicine detected"
+    ),
+    "drug_interaction": (
+        "Potential drug interaction detected"
+    ),
+    "daily_dose_limit_exceeded": (
+        "Reference daily-dose limit exceeded"
+    ),
+    "poor_ocr_quality": (
+        "OCR quality is poor"
+    ),
+    "ocr_extraction_failed": (
+        "Medicine extraction failed"
+    ),
 }
 
 
@@ -57,20 +123,37 @@ ISSUE_LABELS = {
 # Issue formatting
 # ---------------------------------------------------------
 
-def _format_issue(issue: dict) -> dict:
+
+def _format_issue(
+    issue: dict,
+) -> dict:
     """
     Convert one safety issue into a clean report item.
     """
 
-    issue_type = issue.get("type", "unknown_issue")
-    severity = issue.get("severity", "low")
+    issue_type = issue.get(
+        "type",
+        "unknown_issue",
+    )
+
+    severity = issue.get(
+        "severity",
+        "low",
+    )
+
+    # Keep the report contract strict.
+    if severity not in SEVERITY_ORDER:
+        severity = "low"
 
     return {
         "type": issue_type,
         "severity": severity,
         "title": ISSUE_LABELS.get(
             issue_type,
-            issue_type.replace("_", " ").capitalize(),
+            issue_type.replace(
+                "_",
+                " ",
+            ).capitalize(),
         ),
         "message": issue.get(
             "message",
@@ -82,6 +165,7 @@ def _format_issue(issue: dict) -> dict:
 # ---------------------------------------------------------
 # Medicine report
 # ---------------------------------------------------------
+
 
 def _build_medicine_report(
     medicine_result: dict,
@@ -155,6 +239,7 @@ def _build_medicine_report(
 # Summary generation
 # ---------------------------------------------------------
 
+
 def _build_summary(
     safety_analysis: dict,
 ) -> dict:
@@ -198,26 +283,35 @@ def _build_summary(
     )
 
     if high_count > 0:
+
         message = (
             "Human review is required before this "
             "prescription can be considered reliable."
         )
+
     elif medium_count > 0:
+
         message = (
             "Some prescription details require "
             "human verification."
         )
+
     elif issue_count > 0:
+
         message = (
             "Minor prescription information is "
             "incomplete."
         )
+
     elif medicine_count > 0:
+
         message = (
             "No immediate interpretation issues "
             "were detected."
         )
+
     else:
+
         message = (
             "No medicines were detected."
         )
@@ -235,6 +329,7 @@ def _build_summary(
 # ---------------------------------------------------------
 # Main report builder
 # ---------------------------------------------------------
+
 
 def build_prescription_report(
     safety_analysis: dict,
@@ -279,13 +374,26 @@ def build_prescription_report(
     ]
 
     if high_count > 0:
-        overall_status = "review_required"
+
+        overall_status = (
+            "review_required"
+        )
+
     elif summary["issue_count"] > 0:
-        overall_status = "review_recommended"
+
+        overall_status = (
+            "review_recommended"
+        )
+
     elif summary["medicine_count"] > 0:
+
         overall_status = "clear"
+
     else:
-        overall_status = "no_medicines_detected"
+
+        overall_status = (
+            "no_medicines_detected"
+        )
 
     return {
         "overall_status": overall_status,

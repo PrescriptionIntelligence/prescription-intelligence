@@ -44,7 +44,7 @@ class TestDuplicateMedicines:
         flags = check_duplicate_medicines(medicines)
         assert len(flags) == 1
         assert flags[0]["type"] == "duplicate_medicine"
-        assert flags[0]["severity"] == "warning"
+        assert flags[0]["severity"] == "medium"
 
     def test_detects_duplicate_case_insensitive(self):
         medicines = [
