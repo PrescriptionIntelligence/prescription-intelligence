@@ -3,6 +3,10 @@ import re
 from difflib import SequenceMatcher
 from pathlib import Path
 
+from backend.services.external_medicine_knowledge import (
+    lookup_external_medicine,
+)
+
 
 # =========================================================
 # Configuration
@@ -13,6 +17,22 @@ FUZZY_MATCH_THRESHOLD = 0.85
 # Minimum separation required between two DIFFERENT
 # medicines before accepting the best match.
 AMBIGUITY_MARGIN = 0.10
+
+# Local matches below this level are considered weak enough
+# to benefit from external knowledge.
+#
+# IMPORTANT:
+# This does NOT mean that a score >= this value is unsafe.
+# It simply controls when we ask the external knowledge layer
+# for additional hypotheses.
+EXTERNAL_LOOKUP_THRESHOLD = 0.85
+
+# External terminology evidence is intentionally capped.
+#
+# RxNorm provides terminology matching evidence, not clinical
+# verification. Therefore an external source alone should not
+# be allowed to behave like a perfect local curated match.
+MAX_EXTERNAL_HYPOTHESIS_SCORE = 0.74
 
 # Common OCR character confusions in medicine names.
 # These are applied only as candidate variants, never to the
@@ -197,9 +217,10 @@ def _tokenize(text: str) -> list[str]:
         if len(token) >= MIN_TOKEN_LENGTH
     ]
 
-# ---------------------------------------------------------
+
+# =========================================================
 # OCR candidate variants
-# ---------------------------------------------------------
+# =========================================================
 
 def _generate_ocr_variants(
     text: str,
@@ -253,6 +274,7 @@ def _generate_ocr_variants(
         )
 
     return variants
+
 
 # =========================================================
 # Similarity
@@ -602,9 +624,9 @@ def _score_medicine(
     return best_result
 
 
-# ---------------------------------------------------------
-# Find best medicine
-# ---------------------------------------------------------
+# =========================================================
+# Find best local fuzzy match
+# =========================================================
 
 def _find_best_fuzzy_match(
     clean_text: str,
@@ -674,18 +696,8 @@ def _find_best_fuzzy_match(
             )
 
             # -------------------------------------------------
-            # IMPORTANT:
             # Evidence must be calculated against the ORIGINAL
             # OCR candidate, not the corrected variant.
-            #
-            # This prevents:
-            #
-            #   Pant0p -> Pantop
-            #
-            # from being reported as:
-            #
-            #   exact_match=True
-            #   full_score=1.0
             # -------------------------------------------------
 
             original_result = _score_medicine(
@@ -728,6 +740,7 @@ def _find_best_fuzzy_match(
                 or result["score"]
                 > best_medicine_result["score"]
             ):
+
                 best_medicine_result = result
 
         if best_medicine_result is not None:
@@ -804,9 +817,10 @@ def _find_best_fuzzy_match(
 
     return best
 
-# ---------------------------------------------------------
-# Estimate best confidence for review
-# ---------------------------------------------------------
+
+# =========================================================
+# Estimate best local score
+# =========================================================
 
 def _estimate_best_score(
     clean_text: str,
@@ -817,7 +831,7 @@ def _estimate_best_score(
 
     OCR-corrected candidate variants are considered.
 
-    Used only when no reliable match was accepted.
+    Used only when no reliable local match was accepted.
     """
 
     candidate = _prepare_candidate(
@@ -853,8 +867,9 @@ def _estimate_best_score(
 
     return best_score
 
+
 # =========================================================
-# Normalize one candidate
+# Normalize one local candidate
 # =========================================================
 
 def normalize_medicine_candidate(
@@ -862,10 +877,15 @@ def normalize_medicine_candidate(
     medicines: list[dict],
 ) -> dict:
     """
-    Normalize one medicine candidate.
+    Normalize one medicine candidate using the LOCAL
+    curated medicine vocabulary.
 
-    Weak or ambiguous matches are never automatically
-    converted into confirmed medicines.
+    This function intentionally remains local-only.
+
+    External knowledge is integrated into the hypothesis
+    layer below, where external results can be compared
+    alongside local evidence without changing the behavior
+    of existing direct normalization callers.
     """
 
     raw_text = candidate.get(
@@ -886,7 +906,7 @@ def normalize_medicine_candidate(
     )
 
     # -----------------------------------------------------
-    # No reliable match
+    # No reliable local match
     # -----------------------------------------------------
 
     if match is None:
@@ -924,19 +944,21 @@ def normalize_medicine_candidate(
 
             "evidence": {
                 "accepted": False,
-                "reason": "insufficient_or_ambiguous_match",
+                "reason": (
+                    "insufficient_or_ambiguous_match"
+                ),
             },
         }
 
     # -----------------------------------------------------
-    # Reliable match
+    # Reliable local match
     # -----------------------------------------------------
 
     medicine = match[
         "medicine"
     ]
 
-    return { 
+    return {
         "raw_text": raw_text,
 
         "clean_text": clean_text,
@@ -977,76 +999,76 @@ def normalize_medicine_candidate(
         ],
 
         "evidence": {
-    "accepted": True,
+            "accepted": True,
 
-    # Evidence from the ORIGINAL OCR text.
-    "full_text_similarity": round(
-        match.get(
-            "original_full_score",
-            match["full_score"],
-        ),
-        3,
-    ),
+            # Evidence from the ORIGINAL OCR text.
+            "full_text_similarity": round(
+                match.get(
+                    "original_full_score",
+                    match["full_score"],
+                ),
+                3,
+            ),
 
-    "token_similarity": round(
-        match.get(
-            "original_token_score",
-            match["token_score"],
-        ),
-        3,
-    ),
+            "token_similarity": round(
+                match.get(
+                    "original_token_score",
+                    match["token_score"],
+                ),
+                3,
+            ),
 
-    "token_coverage": round(
-        match["token_coverage"],
-        3,
-    ),
+            "token_coverage": round(
+                match["token_coverage"],
+                3,
+            ),
 
-    # These describe the ORIGINAL OCR text.
-    "exact_match": match.get(
-        "original_exact_match",
-        match["exact_match"],
-    ),
+            # These describe the ORIGINAL OCR text.
+            "exact_match": match.get(
+                "original_exact_match",
+                match["exact_match"],
+            ),
 
-    "prefix_match": match.get(
-        "original_prefix_match",
-        match["prefix_match"],
-    ),
+            "prefix_match": match.get(
+                "original_prefix_match",
+                match["prefix_match"],
+            ),
 
-    "ocr_corrected": match.get(
-        "ocr_corrected",
-        False,
-    ),
+            "ocr_corrected": match.get(
+                "ocr_corrected",
+                False,
+            ),
 
-    "candidate_variant": match.get(
-        "candidate_variant",
-    ),
+            "candidate_variant": match.get(
+                "candidate_variant",
+            ),
 
-    "second_best_score": round(
-        match.get(
-            "second_best_score",
-            0.0,
-        ),
-        3,
-    ),
+            "second_best_score": round(
+                match.get(
+                    "second_best_score",
+                    0.0,
+                ),
+                3,
+            ),
 
-    "ranked_results": match.get(
-        "ranked_results",
-        [],
-    ),
-},
+            "ranked_results": match.get(
+                "ranked_results",
+                [],
+            ),
+        },
     }
 
 
 # =========================================================
-# Normalize all candidates
+# Normalize all local candidates
 # =========================================================
 
 def normalize_medicine_candidates(
     candidates: list[dict],
 ) -> list[dict]:
     """
-    Normalize all detected medicine candidates
-    using the medicine vocabulary.
+    Normalize all detected medicine candidates using
+    the local curated medicine vocabulary.
     """
 
     medicines = load_medicine_vocabulary()
@@ -1059,6 +1081,139 @@ def normalize_medicine_candidates(
         for candidate in candidates
     ]
 
+
+# =========================================================
+# External hypothesis conversion
+# =========================================================
+
+def _convert_external_hypothesis(
+    hypothesis: dict,
+) -> dict | None:
+    """
+    Convert an external knowledge result into the internal
+    hypothesis format expected by the evidence-fusion layer.
+
+    External terminology evidence is deliberately capped.
+
+    This prevents a high lexical score from an external
+    terminology service from being interpreted as equivalent
+    to a trusted local medicine match.
+    """
+
+    normalized_name = hypothesis.get(
+        "normalized_name"
+    )
+
+    if not normalized_name:
+        return None
+
+    source_confidence = hypothesis.get(
+        "source_confidence",
+        0.0,
+    )
+
+    try:
+        source_confidence = float(
+            source_confidence
+        )
+    except (
+        TypeError,
+        ValueError,
+    ):
+        source_confidence = 0.0
+
+    source_confidence = max(
+        0.0,
+        min(
+            source_confidence,
+            1.0,
+        ),
+    )
+
+    # External evidence can contribute to ranking but
+    # cannot independently behave like a perfect match.
+    hypothesis_score = min(
+        source_confidence,
+        MAX_EXTERNAL_HYPOTHESIS_SCORE,
+    )
+
+    return {
+        "normalized_name": normalized_name,
+
+        "generic_name": hypothesis.get(
+            "generic_name"
+        ),
+
+        # External sources may not provide strength/form
+        # information for this particular lookup.
+        "strength_value": hypothesis.get(
+            "strength_value"
+        ),
+
+        "strength_unit": hypothesis.get(
+            "strength_unit"
+        ),
+
+        "dosage_form": hypothesis.get(
+            "dosage_form"
+        ),
+
+        "matched_term": hypothesis.get(
+            "matched_term"
+        ),
+
+        "score": round(
+            hypothesis_score,
+            3,
+        ),
+
+        "token_score": round(
+            hypothesis_score,
+            3,
+        ),
+
+        "full_score": round(
+            hypothesis_score,
+            3,
+        ),
+
+        # -------------------------------------------------
+        # Provenance
+        # -------------------------------------------------
+
+        "source": hypothesis.get(
+            "source",
+            "external",
+        ),
+
+        "source_id": hypothesis.get(
+            "source_id"
+        ),
+
+        "match_method": hypothesis.get(
+            "match_method"
+        ),
+
+        "source_confidence": round(
+            source_confidence,
+            3,
+        ),
+
+        "clinically_verified": bool(
+            hypothesis.get(
+                "clinically_verified",
+                False,
+            )
+        ),
+
+        "external": True,
+    }
+
+
+# =========================================================
+# Ranked medicine hypotheses
+# =========================================================
+
 def get_ranked_medicine_hypotheses(
     candidate: dict,
     medicines: list[dict] | None = None,
@@ -1068,19 +1223,26 @@ def get_ranked_medicine_hypotheses(
     Return the most likely medicine hypotheses for a noisy
     OCR candidate.
 
-    Unlike normalize_medicine_candidate(), this function
-    does not require a match to cross the final acceptance
-    threshold.
+    Resolution strategy:
 
-    It is useful for difficult handwritten prescriptions
-    where OCR may provide partial or noisy evidence.
+        1. Search the local curated vocabulary.
+        2. If local evidence is strong, return local
+           hypotheses only.
+        3. If local evidence is weak or absent, query the
+           external medicine knowledge layer.
+        4. Preserve both local and external hypotheses.
+        5. Mark external results with provenance.
+        6. Never treat external terminology as clinical
+           verification.
 
-    IMPORTANT:
     These are hypotheses, not confirmed medicines.
     """
 
     if medicines is None:
         medicines = load_medicine_vocabulary()
+
+    if top_k <= 0:
+        return []
 
     raw_text = candidate.get(
         "medicine_text",
@@ -1101,12 +1263,12 @@ def get_ranked_medicine_hypotheses(
     if not prepared_candidate:
         return []
 
-    results = []
+    # -----------------------------------------------------
+    # Local hypotheses
+    # -----------------------------------------------------
 
-    # Score each medicine once using all of its names
-    # and aliases as possible evidence.
-        # Score each medicine using the strongest OCR candidate
-    # variant available.
+    local_results = []
+
     candidate_variants = _generate_ocr_variants(
         prepared_candidate
     )
@@ -1137,44 +1299,235 @@ def get_ranked_medicine_hypotheses(
 
         result = best_result
 
-        results.append(
+        local_results.append(
             {
                 "normalized_name": medicine.get(
                     "brand_name"
                 ),
+
                 "generic_name": medicine.get(
                     "generic_name"
                 ),
+
                 "strength_value": medicine.get(
                     "strength_value"
                 ),
+
                 "strength_unit": medicine.get(
                     "strength_unit"
                 ),
+
                 "dosage_form": medicine.get(
                     "dosage_form"
                 ),
+
                 "matched_term": result.get(
                     "matched_term"
                 ),
+
                 "score": round(
-                    result.get("score", 0.0),
+                    result.get(
+                        "score",
+                        0.0,
+                    ),
                     3,
                 ),
+
                 "token_score": round(
-                    result.get("token_score", 0.0),
+                    result.get(
+                        "token_score",
+                        0.0,
+                    ),
                     3,
                 ),
+
                 "full_score": round(
-                    result.get("full_score", 0.0),
+                    result.get(
+                        "full_score",
+                        0.0,
+                    ),
                     3,
                 ),
+
+                # Local curated source.
+                "source": "curated",
+
+                "source_id": None,
+
+                "match_method": "local_fuzzy",
+
+                "source_confidence": round(
+                    result.get(
+                        "score",
+                        0.0,
+                    ),
+                    3,
+                ),
+
+                "clinically_verified": False,
+
+                "external": False,
             }
         )
 
-    results.sort(
+    local_results.sort(
         key=lambda result: result["score"],
         reverse=True,
     )
 
-    return results[:top_k]
+    best_local_score = (
+        local_results[0]["score"]
+        if local_results
+        else 0.0
+    )
+
+    # -----------------------------------------------------
+    # Strong local match
+    # -----------------------------------------------------
+
+    if best_local_score >= EXTERNAL_LOOKUP_THRESHOLD:
+
+        return local_results[:top_k]
+
+    # -----------------------------------------------------
+    # Weak/no local match:
+    # query external knowledge.
+    # -----------------------------------------------------
+
+    external_results = []
+
+    try:
+        external_hypotheses = (
+            lookup_external_medicine(
+                prepared_candidate,
+                top_k=top_k,
+            )
+        )
+
+        for hypothesis in external_hypotheses:
+
+            converted = (
+                _convert_external_hypothesis(
+                    hypothesis
+                )
+            )
+
+            if converted is not None:
+                external_results.append(
+                    converted
+                )
+
+    except Exception:
+        # The external layer is supplementary.
+        #
+        # If anything unexpected happens, preserve the
+        # existing local-only behavior.
+        external_results = []
+
+    # -----------------------------------------------------
+    # Combine local + external hypotheses.
+    # -----------------------------------------------------
+
+    combined_results = [
+        *local_results,
+        *external_results,
+    ]
+
+    if not combined_results:
+        return []
+
+    # -----------------------------------------------------
+    # Deduplicate hypotheses representing the same generic
+    # medicine from multiple sources.
+    #
+    # Local curated evidence is preferred when both sources
+    # identify the same normalized medicine.
+    # -----------------------------------------------------
+
+    deduplicated = {}
+
+    for result in combined_results:
+
+        normalized_name = _clean_text(
+            result.get(
+                "normalized_name",
+                "",
+            )
+        )
+
+        generic_name = _clean_text(
+            result.get(
+                "generic_name",
+                "",
+            )
+        )
+
+        identity_key = (
+            generic_name
+            or normalized_name
+        )
+
+        if not identity_key:
+            continue
+
+        existing = deduplicated.get(
+            identity_key
+        )
+
+        if existing is None:
+
+            deduplicated[
+                identity_key
+            ] = result
+
+            continue
+
+        # Prefer local curated evidence over an external
+        # hypothesis for the same medicine.
+        if (
+            existing.get("external", False)
+            and not result.get(
+                "external",
+                False,
+            )
+        ):
+            deduplicated[
+                identity_key
+            ] = result
+
+        elif (
+            existing.get("external", False)
+            == result.get(
+                "external",
+                False,
+            )
+            and result.get(
+                "score",
+                0.0,
+            )
+            > existing.get(
+                "score",
+                0.0,
+            )
+        ):
+            deduplicated[
+                identity_key
+            ] = result
+
+    combined_results = list(
+        deduplicated.values()
+    )
+
+    # -----------------------------------------------------
+    # Rank combined hypotheses.
+    # -----------------------------------------------------
+
+    combined_results.sort(
+        key=lambda result: result.get(
+            "score",
+            0.0,
+        ),
+        reverse=True,
+    )
+
+    return combined_results[:top_k]

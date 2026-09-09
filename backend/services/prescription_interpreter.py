@@ -37,14 +37,21 @@ def _determine_prescription_status(
     results: list[dict],
 ) -> str:
     """
-    Determine the overall safety status of a prescription.
+    Determine the overall medicine-resolution status
+    of a prescription.
 
     Possible statuses:
 
-        review_required
+        accepted
         partially_resolved
-        resolved
+        review_required
         no_medicines_detected
+
+    Important:
+        "accepted" refers to medicine identity resolution.
+
+        It does NOT mean that the prescription is clinically
+        safe, appropriate, or free from drug interactions.
     """
 
     if not results:
@@ -56,22 +63,34 @@ def _determine_prescription_status(
         if result["resolution"]["status"] == "needs_review"
     )
 
-    resolved_count = sum(
+    accepted_count = sum(
         1
         for result in results
-        if result["resolution"]["status"] == "resolved"
+        if result["resolution"]["status"] == "accepted"
     )
 
-    if review_count == len(results):
+    unknown_count = sum(
+        1
+        for result in results
+        if result["resolution"]["status"] == "unknown"
+    )
+
+    # Every detected medicine requires review.
+    if review_count + unknown_count == len(results):
         return "review_required"
 
-    if review_count > 0:
+    # At least one medicine is accepted, but one or more
+    # medicines still require review or could not be identified.
+    if review_count > 0 or unknown_count > 0:
         return "partially_resolved"
 
-    if resolved_count == len(results):
-        return "resolved"
+    # Every detected medicine was confidently accepted.
+    if accepted_count == len(results):
+        return "accepted"
 
+    # Defensive fallback.
     return "review_required"
+
 
 # ---------------------------------------------------------
 # Process one medicine candidate
@@ -87,7 +106,7 @@ def interpret_medicine_candidate(
 
         candidate
             ↓
-        similarity hypotheses
+        medicine hypotheses
             ↓
         evidence fusion
             ↓
@@ -155,9 +174,14 @@ def interpret_prescription(
     prescription-level intelligence result.
 
     This is the main entry point for the interpreter.
+
+    The interpreter focuses on medicine identity resolution.
+    Clinical safety checks such as drug interactions,
+    dose limits, and other safety rules are handled by
+    separate safety-analysis layers.
     """
 
-    medicine_results = []
+    medicine_results: list[dict] = []
 
     for candidate in candidates:
 
@@ -169,8 +193,15 @@ def interpret_prescription(
             result
         )
 
-    status = _determine_prescription_status(
-        medicine_results
+    # -----------------------------------------------------
+    # Count resolution outcomes
+    # -----------------------------------------------------
+
+    accepted_count = sum(
+        1
+        for result in medicine_results
+        if result["resolution"]["status"]
+        == "accepted"
     )
 
     review_count = sum(
@@ -180,12 +211,24 @@ def interpret_prescription(
         == "needs_review"
     )
 
-    resolved_count = sum(
+    unknown_count = sum(
         1
         for result in medicine_results
         if result["resolution"]["status"]
-        == "resolved"
+        == "unknown"
     )
+
+    # -----------------------------------------------------
+    # Determine prescription-level status
+    # -----------------------------------------------------
+
+    status = _determine_prescription_status(
+        medicine_results
+    )
+
+    # -----------------------------------------------------
+    # Return structured intelligence result
+    # -----------------------------------------------------
 
     return {
         "status": status,
@@ -194,9 +237,11 @@ def interpret_prescription(
             medicine_results
         ),
 
-        "resolved_count": resolved_count,
+        "accepted_count": accepted_count,
 
-        "review_required_count": review_count,
+        "review_required_count": (
+            review_count + unknown_count
+        ),
 
         "medicines": medicine_results,
     }

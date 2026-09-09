@@ -374,10 +374,13 @@ export default function AnalysisDetailPage() {
                     </p>
                   </div>
                 ) : (
-                  prescription.medicines.map((medicine) => (
-                    <MedicineCard key={medicine.id} medicine={medicine} />
+                  prescription.medicines.map((medicine, index) => (
+                    <MedicineCard
+                      key={`${medicine.id ?? medicine.medicine_name ?? "medicine"}-${index}`}
+                      medicine={medicine}
+                    />
                   ))
-                )}
+                                  )}
               </div>
             )}
 

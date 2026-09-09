@@ -15,52 +15,59 @@ from backend.services.medicine_normalizer import (
 # =========================================================
 
 # Matches a digit sequence anywhere on the line — with or without a
-# trailing unit attached (e.g. "40mg", "200", "4.8").  The leading
-# word-boundary keeps us from matching digits embedded mid-word.
+# trailing unit attached (e.g. "40mg", "200", "4.8").
 _NUMERIC_RE = re.compile(r"\b\d+(?:\.\d+)?")
 
 
-def _is_bare_medicine_line(line: str, vocabulary: list[dict]) -> bool:
+def _is_bare_medicine_line(
+    line: str,
+    vocabulary: list[dict],
+) -> bool:
     """
     Return True when a line has no dosage-form prefix and no leading
     number, yet is still a plausible prescription medicine line.
 
     Two independent gates must BOTH pass:
 
-    Gate A — vocabulary score ≥ FUZZY_MATCH_THRESHOLD (0.85)
-        The first meaningful token(s) must fuzzy-match a term in the
-        medicine vocabulary at the same threshold the normalizer uses.
-        This rejects arbitrary English sentences, metadata ("Patient",
-        "Date", "Weight", "Dispense", "Day"), and garbled OCR.
+    Gate A — vocabulary score >= FUZZY_MATCH_THRESHOLD
+        The line must strongly resemble a known medicine.
 
-    Gate B — a numeric value is present on the line
-        A prescription line always includes a dose, strength, or
-        quantity.  Requiring a number prevents medicine names that
-        appear in non-prescription contexts (e.g. "Paracetamol allergy
-        noted", "Continue Pantoprazole as before") from becoming blocks.
+    Gate B — a numeric value is present
+        A prescription medicine line should contain a strength,
+        dose, or quantity.
 
-    Examples that pass  : "Azithromycin 200 og/ smb"
-                          "Pantoprazole 40mg once daily"
-                          "Cetirizine 10 mg at night"
-    Examples that fail  : "Patient 25 years old"       (score 0.62)
-                          "Paracetamol allergy noted"  (no numeric)
-                          "Day 2 4.8 mL"               (score 0.30)
-                          "xyz### @!@ 111"              (score 0.29)
+    Examples that pass:
+        Azithromycin 200 og/ smb
+        Pantoprazole 40mg once daily
+        Cetirizine 10 mg at night
+
+    Examples that fail:
+        Patient 25 years old
+        Paracetamol allergy noted
+        Day 2 4.8 mL
+        xyz### @!@ 111
     """
 
     if not line:
         return False
 
-    # Gate B first — cheapest check.
+    # Gate B — cheapest check.
     if not _NUMERIC_RE.search(line):
         return False
 
     # Gate A — vocabulary fuzzy match.
-    candidate = _prepare_candidate(_clean_text(line))
+    candidate = _prepare_candidate(
+        _clean_text(line)
+    )
+
     if not candidate:
         return False
 
-    score = _estimate_best_score(candidate, vocabulary)
+    score = _estimate_best_score(
+        candidate,
+        vocabulary,
+    )
+
     return score >= FUZZY_MATCH_THRESHOLD
 
 
@@ -73,17 +80,15 @@ def _parse_frequency(text: str):
     Parse prescription frequency.
 
     Examples:
-        once daily       -> 1/day
-        twice daily      -> 2/day
+        once daily        -> 1/day
+        twice daily       -> 2/day
         three times daily -> 3/day
-        2 times daily    -> 2/day
-        0 times daily    -> 0/day
-        -2 times daily   -> -2/day
+        2 times daily     -> 2/day
+        0 times daily     -> 0/day
+        -2 times daily    -> -2/day
 
-    Important:
-        The parser preserves zero and negative numeric values.
-        Validation is responsible for determining whether those
-        values are acceptable.
+    Zero and negative values are intentionally preserved so
+    validation can determine whether they are valid.
     """
 
     if not text:
@@ -113,7 +118,10 @@ def _parse_frequency(text: str):
     ):
         return 3, "daily"
 
-    if "morning" in lower and "evening" in lower:
+    if (
+        "morning" in lower
+        and "evening" in lower
+    ):
         return 2, "daily"
 
     if "morning" in lower:
@@ -129,9 +137,6 @@ def _parse_frequency(text: str):
     #   1-0-1 -> 2/day
     #   1-1-1 -> 3/day
     #   0-0-0 -> 0/day
-    #
-    # Negative values are preserved rather than silently
-    # converted to positive numbers.
     # -----------------------------------------------------
 
     schedule_match = re.search(
@@ -152,12 +157,6 @@ def _parse_frequency(text: str):
             float(schedule_match.group(3)),
         ]
 
-        # A prescription schedule represents the number of
-        # administrations when its entries are positive.
-        #
-        # If every value is zero, preserve 0 so the validator
-        # can flag it as invalid rather than treating it as
-        # missing.
         frequency = sum(
             1
             for value in values
@@ -170,8 +169,6 @@ def _parse_frequency(text: str):
         if all(value == 0 for value in values):
             return 0, "daily"
 
-        # Negative schedule values are invalid. Preserve a
-        # negative value so validation can report it.
         negative_values = [
             value
             for value in values
@@ -183,11 +180,6 @@ def _parse_frequency(text: str):
 
     # -----------------------------------------------------
     # Single numeric frequency
-    #
-    # Examples:
-    #   2 times daily -> 2/day
-    #   0 times daily -> 0/day
-    #   -2 times daily -> -2/day
     # -----------------------------------------------------
 
     every_match = re.search(
@@ -208,6 +200,7 @@ def _parse_frequency(text: str):
 
     return None, None
 
+
 # =========================================================
 # Helper: Parse dose
 # =========================================================
@@ -225,11 +218,6 @@ def _parse_dose(text: str):
         -1 tablet
         1-0-1
         0-0-1
-
-    Important:
-        Numeric values are preserved exactly, including zero
-        and negative values. Validation determines whether
-        the extracted value is acceptable.
     """
 
     if not text:
@@ -239,14 +227,6 @@ def _parse_dose(text: str):
 
     # -----------------------------------------------------
     # Numeric schedule
-    #
-    # Examples:
-    #   1-0-1
-    #   0-0-1
-    #   1-1-1
-    #
-    # For a schedule, use the largest positive administration
-    # value as the dose quantity.
     # -----------------------------------------------------
 
     schedule_match = re.search(
@@ -276,13 +256,12 @@ def _parse_dose(text: str):
         if positive_values:
             return max(positive_values), "tablet"
 
-        # Preserve an all-zero schedule so validation can
-        # identify it as invalid rather than treating it
-        # as missing.
-        if all(value == 0 for value in schedule_values):
+        if all(
+            value == 0
+            for value in schedule_values
+        ):
             return 0.0, "tablet"
 
-        # Preserve a negative value so validation can flag it.
         negative_values = [
             value
             for value in schedule_values
@@ -318,25 +297,191 @@ def _parse_dose(text: str):
 
     unit = dose_match.group(2)
 
-    if unit in {"tab", "tablet", "tablets"}:
+    if unit in {
+        "tab",
+        "tablet",
+        "tablets",
+    }:
         unit = "tablet"
 
-    elif unit in {"cap", "capsule", "capsules"}:
+    elif unit in {
+        "cap",
+        "capsule",
+        "capsules",
+    }:
         unit = "capsule"
 
-    elif unit in {"ml", "milliliter", "milliliters"}:
+    elif unit in {
+        "ml",
+        "milliliter",
+        "milliliters",
+    }:
         unit = "ml"
 
-    elif unit in {"drop", "drops"}:
+    elif unit in {
+        "drop",
+        "drops",
+    }:
         unit = "drop"
 
-    elif unit in {"puff", "puffs"}:
+    elif unit in {
+        "puff",
+        "puffs",
+    }:
         unit = "puff"
 
-    elif unit in {"unit", "units"}:
+    elif unit in {
+        "unit",
+        "units",
+    }:
         unit = "unit"
 
     return value, unit
+
+
+# =========================================================
+# Helper: Parse natural-language instruction dose
+# =========================================================
+
+def _parse_instruction_dose(text: str):
+    """
+    Parse dose quantities embedded in natural-language
+    prescription instructions.
+
+    Examples:
+        Take 1 tablet orally once daily -> 1 tablet
+        Take 2 tablets after food -> 2 tablets
+        Take 5 ml twice daily -> 5 ml
+        1 capsule orally -> 1 capsule
+    """
+
+    if not text:
+        return None, None
+
+    lower = text.lower().strip()
+
+    dose_match = re.search(
+        r"\b(?:take|use|administer|give)?\s*"
+        r"(-?\d+(?:\.\d+)?)\s*"
+        r"(tablet|tablets|tab|"
+        r"capsule|capsules|cap|"
+        r"ml|milliliter|milliliters|"
+        r"drop|drops|"
+        r"puff|puffs|"
+        r"unit|units)\b",
+        lower,
+    )
+
+    if not dose_match:
+        return None, None
+
+    value = float(
+        dose_match.group(1)
+    )
+
+    unit = dose_match.group(2)
+
+    if unit in {
+        "tab",
+        "tablet",
+        "tablets",
+    }:
+        unit = "tablet"
+
+    elif unit in {
+        "cap",
+        "capsule",
+        "capsules",
+    }:
+        unit = "capsule"
+
+    elif unit in {
+        "ml",
+        "milliliter",
+        "milliliters",
+    }:
+        unit = "ml"
+
+    elif unit in {
+        "drop",
+        "drops",
+    }:
+        unit = "drop"
+
+    elif unit in {
+        "puff",
+        "puffs",
+    }:
+        unit = "puff"
+
+    elif unit in {
+        "unit",
+        "units",
+    }:
+        unit = "unit"
+
+    return value, unit
+
+
+# =========================================================
+# Helper: Parse natural-language frequency
+# =========================================================
+
+def _parse_instruction_frequency(text: str):
+    """
+    Parse frequency embedded in natural-language instructions.
+
+    Examples:
+        Take 1 tablet once daily -> 1/day
+        Take 1 tablet twice daily -> 2/day
+        Take 1 tablet three times daily -> 3/day
+        Take 1 tablet every morning -> 1/day
+        Take 1 tablet morning and evening -> 2/day
+    """
+
+    if not text:
+        return None, None
+
+    lower = text.lower().strip()
+
+    if re.search(
+        r"\b(once|one)\s+(daily|a\s+day)\b",
+        lower,
+    ):
+        return 1, "daily"
+
+    if re.search(
+        r"\b(twice|two)\s+(daily|a\s+day)\b",
+        lower,
+    ):
+        return 2, "daily"
+
+    if re.search(
+        r"\b(three|thrice)\s+(times\s+)?(daily|a\s+day)\b",
+        lower,
+    ):
+        return 3, "daily"
+
+    if re.search(
+        r"\bevery\s+(morning|evening)\b",
+        lower,
+    ):
+        return 1, "daily"
+
+    if (
+        "morning" in lower
+        and "evening" in lower
+    ):
+        return 2, "daily"
+
+    if "morning" in lower:
+        return 1, "daily"
+
+    if "evening" in lower:
+        return 1, "daily"
+
+    return None, None
+
 
 # =========================================================
 # Helper: Parse duration
@@ -366,7 +511,10 @@ def _parse_duration(text: str):
     if not duration_match:
         return None, None
 
-    value = float(duration_match.group(1))
+    value = float(
+        duration_match.group(1)
+    )
+
     unit = duration_match.group(2).lower()
 
     if unit == "day":
@@ -434,33 +582,47 @@ def _is_non_medicine_line(line: str) -> bool:
     )
 
     # Empty / punctuation-only
-    if not re.search(r"[a-zA-Z0-9]", normalized):
+    if not re.search(
+        r"[a-zA-Z0-9]",
+        normalized,
+    ):
         return True
 
-    # Common prescription metadata
+    # Common prescription metadata and section headings.
     metadata_patterns = [
-        r"^doctor\s*:",
-        r"^patient\s*:",
-        r"^date\s*:",
-        r"^age\s*:",
-        r"^gender\s*:",
-        r"^sex\s*:",
-        r"^address\s*:",
-        r"^phone\s*:",
-        r"^mobile\s*:",
-        r"^diagnosis\s*:",
+        r"^doctor\s*:?",
+        r"^patient\s*:?",
+        r"^date\s*:?",
+        r"^age\s*:?",
+        r"^gender\s*:?",
+        r"^sex\s*:?",
+        r"^address\s*:?",
+        r"^phone\s*:?",
+        r"^mobile\s*:?",
+        r"^diagnosis\s*:?",
         r"^prescription\s*:?",
         r"^medicines?\s*:?",
         r"^medications?\s*:?",
         r"^rx\s*:?",
         r"^treatment\s*:?",
+        r"^general\s+advice\s*:?",
+        r"^follow[\-\s]?up\s*:?",
+        r"^assessment\s*:?",
+        r"^clinical\s+information\s*:?",
+        r"^chief\s+complaints?\s*:?",
+        r"^weight\s*:?",
+        r"^blood\s+pressure\s*:?",
+        r"^pulse\s*:?",
     ]
 
     for pattern in metadata_patterns:
-        if re.search(pattern, normalized):
+        if re.search(
+            pattern,
+            normalized,
+        ):
             return True
 
-    # Common test / disclaimer lines
+    # Common test / disclaimer lines.
     disclaimer_patterns = [
         r"^for\s+ocr\s+testing\s+only$",
         r"^for\s+testing\s+only$",
@@ -473,7 +635,10 @@ def _is_non_medicine_line(line: str) -> bool:
     ]
 
     for pattern in disclaimer_patterns:
-        if re.search(pattern, normalized):
+        if re.search(
+            pattern,
+            normalized,
+        ):
             return True
 
     return False
@@ -505,6 +670,36 @@ def _is_numbered_medicine_line(line: str) -> bool:
 
 
 # =========================================================
+# Helper: Detect legacy dosage-form medicine entry
+# =========================================================
+
+def _is_legacy_medicine_line(line: str) -> bool:
+    """
+    Detect medicine entries beginning with a dosage-form prefix.
+
+    Examples:
+        Tab Paracetamol 500 mg
+        Tablet Pantoprazole 40 mg
+        Cap Cetirizine 10 mg
+        Inj Ceftriaxone 1 g
+        Syp Paracetamol 250 mg
+    """
+
+    if not line:
+        return False
+
+    return bool(
+        re.match(
+            r"^\s*(?:tab(?:let)?|cap(?:sule)?|"
+            r"caps(?:ule)?|inj(?:ection)?|"
+            r"syp(?:rup)?)\b",
+            line,
+            re.IGNORECASE,
+        )
+    )
+
+
+# =========================================================
 # Helper: Split prescription blocks
 # =========================================================
 
@@ -515,21 +710,16 @@ def _split_prescription_blocks(
     """
     Convert OCR text into logical medicine blocks.
 
-    Important behavior:
+    Supports:
 
-    - Ignores text before the first numbered medicine.
-    - Ignores common prescription metadata.
-    - Stops attaching footer/disclaimer text after the
-      final medicine.
-    - Preserves unknown lines inside an active medicine block.
-    - Supports numbered multi-line prescriptions.
-    - Supports bare medicine lines (e.g. handwritten without
-      prefix or number) when they pass the vocabulary gate.
-    - Supports simple semicolon-separated entries.
-
-    ``vocabulary`` is accepted from the caller to avoid
-    reloading it; if omitted it is loaded here.
+    - Numbered multi-line prescriptions
+    - Tablet/capsule/injection/syrup prefixes
+    - Bare medicine lines
+    - Simple semicolon-separated entries
+    - OCR metadata filtering
+    - Prescription section boundaries
     """
+
     if vocabulary is None:
         vocabulary = load_medicine_vocabulary()
 
@@ -574,23 +764,13 @@ def _split_prescription_blocks(
             continue
 
         # -------------------------------------------------
-        # Before first numbered medicine:
-        # ignore headers / metadata.
+        # Before first numbered medicine
         # -------------------------------------------------
 
         if not started_numbered_mode:
 
-            # Legacy unnumbered medicine detection
-            # e.g. "Tab Paracetamol 500 mg"
-            legacy_match = re.match(
-                r"^\s*(?:tab(?:let)?|cap(?:sule)?|"
-                r"caps(?:ule)?|inj(?:ection)?|"
-                r"syp(?:rup)?)\b",
-                line,
-                re.IGNORECASE,
-            )
-
-            if legacy_match:
+            # Legacy dosage-form medicine.
+            if _is_legacy_medicine_line(line):
 
                 if current_block:
                     blocks.append(
@@ -598,16 +778,17 @@ def _split_prescription_blocks(
                     )
 
                 current_block = [line]
-                started_numbered_mode = False
                 continue
 
             # Ignore metadata/header text.
             if _is_non_medicine_line(line):
                 continue
 
-            # Bare medicine line — passes vocabulary + numeric gates.
-            # e.g. "Azithromycin 200 og/ smb" (handwritten, noisy OCR)
-            if _is_bare_medicine_line(line, vocabulary):
+            # Bare medicine line.
+            if _is_bare_medicine_line(
+                line,
+                vocabulary,
+            ):
 
                 if current_block:
                     blocks.append(
@@ -615,19 +796,19 @@ def _split_prescription_blocks(
                     )
 
                 current_block = [line]
-                # Do NOT set started_numbered_mode — subsequent lines
-                # should still be attached via the block-append path.
                 continue
 
-            # Everything else (arbitrary text, headers not caught
-            # above) is dropped before the first recognised entry.
+            # Arbitrary text before a medicine is ignored.
             continue
 
         # -------------------------------------------------
         # We are inside numbered medicine mode.
         # -------------------------------------------------
 
-        # Footer / disclaimer after a medicine.
+        # A new medicine is handled at the beginning of the loop.
+        # Here we only need to detect section boundaries and
+        # metadata that should not be attached to the medicine.
+
         if _is_non_medicine_line(line):
 
             normalized = re.sub(
@@ -636,8 +817,29 @@ def _split_prescription_blocks(
                 line.strip().lower(),
             )
 
-            # These should terminate the current medicine
-            # rather than become its instruction text.
+            # -------------------------------------------------
+            # Prescription section boundaries
+            # -------------------------------------------------
+
+            if re.match(
+                r"^(general\s+advice|follow[\-\s]?up|"
+                r"assessment|clinical\s+information|"
+                r"chief\s+complaints?|weight|blood\s+pressure|"
+                r"pulse)\s*:?",
+                normalized,
+            ):
+                if current_block:
+                    blocks.append(
+                        "\n".join(current_block)
+                    )
+                    current_block = []
+
+                continue
+
+            # -------------------------------------------------
+            # Footer / disclaimer
+            # -------------------------------------------------
+
             if (
                 normalized.startswith("for ocr testing")
                 or normalized.startswith("for testing")
@@ -646,13 +848,23 @@ def _split_prescription_blocks(
                 or normalized.startswith("sample prescription")
                 or normalized.startswith("demo prescription")
             ):
+                if current_block:
+                    blocks.append(
+                        "\n".join(current_block)
+                    )
+                    current_block = []
+
                 continue
 
+            # -------------------------------------------------
             # Metadata should not be attached to medicine.
+            # -------------------------------------------------
+
             if re.match(
                 r"^(doctor|patient|date|age|gender|sex|"
                 r"address|phone|mobile|diagnosis|"
-                r"prescription|medicines?|medications?)\s*:?",
+                r"prescription|medicines?|medications?|"
+                r"rx|treatment)\s*:?",
                 normalized,
             ):
                 continue
@@ -674,7 +886,7 @@ def _split_prescription_blocks(
         )
 
     # -----------------------------------------------------
-    # Remove empty blocks
+    # Remove empty / invalid blocks
     # -----------------------------------------------------
 
     final_blocks = []
@@ -684,29 +896,34 @@ def _split_prescription_blocks(
         if not block.strip():
             continue
 
-        # A block must look like a medicine entry.
-        first_line = block.splitlines()[0].strip()
-
-        looks_numbered = _is_numbered_medicine_line(
-            first_line
+        first_line = (
+            block.splitlines()[0].strip()
         )
 
-        looks_legacy = bool(
-            re.match(
-                r"^\s*(?:tab(?:let)?|cap(?:sule)?|"
-                r"caps(?:ule)?|inj(?:ection)?|"
-                r"syp(?:rup)?)\b",
-                first_line,
-                re.IGNORECASE,
+        looks_numbered = (
+            _is_numbered_medicine_line(
+                first_line
             )
         )
 
-        looks_bare = _is_bare_medicine_line(
-            first_line,
-            vocabulary,
+        looks_legacy = (
+            _is_legacy_medicine_line(
+                first_line
+            )
         )
 
-        if looks_numbered or looks_legacy or looks_bare:
+        looks_bare = (
+            _is_bare_medicine_line(
+                first_line,
+                vocabulary,
+            )
+        )
+
+        if (
+            looks_numbered
+            or looks_legacy
+            or looks_bare
+        ):
             final_blocks.append(block)
 
     return final_blocks
@@ -716,7 +933,9 @@ def _split_prescription_blocks(
 # Helper: Legacy single-line entries
 # =========================================================
 
-def _split_prescription_entries(raw_text: str) -> list[str]:
+def _split_prescription_entries(
+    raw_text: str,
+) -> list[str]:
     """
     Backward-compatible helper.
 
@@ -762,7 +981,9 @@ def _split_prescription_entries(raw_text: str) -> list[str]:
 # Helper: Parse prescription block
 # =========================================================
 
-def _parse_prescription_block(block: str) -> dict:
+def _parse_prescription_block(
+    block: str,
+) -> dict:
     """
     Parse a complete medicine block.
 
@@ -852,21 +1073,11 @@ def _parse_prescription_block(block: str) -> dict:
             medicine_match.group(1).strip()
         )
 
-        # -------------------------------------------------
-        # Reject numeric-only medicine names
-        # -------------------------------------------------
-        #
-        # Examples that must NOT become medicine names:
-        #
-        #     500 mg
-        #     10 mg
-        #     2.5 ml
-        #
-        # These are incomplete/invalid medicine entries.
-        # Do not manufacture a medicine identity from them.
-        # -------------------------------------------------
-
-        if not re.search(r"[A-Za-z]", raw_name):
+        # Reject numeric-only medicine names.
+        if not re.search(
+            r"[A-Za-z]",
+            raw_name,
+        ):
             return {}
 
         strength_value_raw = (
@@ -917,10 +1128,7 @@ def _parse_prescription_block(block: str) -> dict:
 
     else:
 
-        # -------------------------------------------------
-        # Reject strength-only / numeric-only medicine lines
-        # -------------------------------------------------
-
+        # Reject strength-only medicine lines.
         strength_only_match = re.fullmatch(
             r"\d+(?:\.\d+)?"
             r"(?:\s*\+\s*\d+(?:\.\d+)?)*"
@@ -961,7 +1169,10 @@ def _parse_prescription_block(block: str) -> dict:
 
     for line in lines[1:]:
 
+        # -------------------------------------------------
         # Dose
+        # -------------------------------------------------
+
         dose_match = re.match(
             r"^\s*dose\s*:\s*(.+)$",
             line,
@@ -977,7 +1188,10 @@ def _parse_prescription_block(block: str) -> dict:
 
             continue
 
+        # -------------------------------------------------
         # Frequency
+        # -------------------------------------------------
+
         frequency_match = re.match(
             r"^\s*frequency\s*:\s*(.+)$",
             line,
@@ -993,7 +1207,10 @@ def _parse_prescription_block(block: str) -> dict:
 
             continue
 
+        # -------------------------------------------------
         # Duration
+        # -------------------------------------------------
+
         duration_match = re.match(
             r"^\s*duration\s*:\s*(.+)$",
             line,
@@ -1009,7 +1226,10 @@ def _parse_prescription_block(block: str) -> dict:
 
             continue
 
+        # -------------------------------------------------
         # Instructions
+        # -------------------------------------------------
+
         instruction_match = re.match(
             r"^\s*instructions?\s*:\s*(.+)$",
             line,
@@ -1025,15 +1245,18 @@ def _parse_prescription_block(block: str) -> dict:
 
             continue
 
+        # -------------------------------------------------
         # Unknown lines are preserved as possible
         # instruction text.
+        # -------------------------------------------------
+
         instructions_text += (
             " "
             + line
         )
 
     # -----------------------------------------------------
-    # Parse fields
+    # Parse explicitly labelled fields
     # -----------------------------------------------------
 
     dose_value, dose_unit = _parse_dose(
@@ -1053,6 +1276,43 @@ def _parse_prescription_block(block: str) -> dict:
     )
 
     # -----------------------------------------------------
+    # Parse natural-language instructions
+    # -----------------------------------------------------
+
+    instruction_parse_text = " ".join(
+        value
+        for value in [
+            trailing_text,
+            instructions_text,
+        ]
+        if value
+    )
+
+    if dose_value is None:
+
+        dose_value, dose_unit = (
+            _parse_instruction_dose(
+                instruction_parse_text
+            )
+        )
+
+    if frequency_value is None:
+
+        frequency_value, frequency_unit = (
+            _parse_instruction_frequency(
+                instruction_parse_text
+            )
+        )
+
+    if duration_value is None:
+
+        duration_value, duration_unit = (
+            _parse_duration(
+                instruction_parse_text
+            )
+        )
+
+    # -----------------------------------------------------
     # Fallback parsing
     # -----------------------------------------------------
 
@@ -1063,23 +1323,43 @@ def _parse_prescription_block(block: str) -> dict:
             dose_text,
             frequency_text,
             duration_text,
+            instructions_text,
         ]
         if value
     )
 
     if dose_value is None:
+
         dose_value, dose_unit = _parse_dose(
             fallback_text
         )
 
+    if dose_value is None:
+
+        dose_value, dose_unit = (
+            _parse_instruction_dose(
+                fallback_text
+            )
+        )
+
     if frequency_value is None:
+
         frequency_value, frequency_unit = (
             _parse_frequency(
                 fallback_text
             )
         )
 
+    if frequency_value is None:
+
+        frequency_value, frequency_unit = (
+            _parse_instruction_frequency(
+                fallback_text
+            )
+        )
+
     if duration_value is None:
+
         duration_value, duration_unit = (
             _parse_duration(
                 fallback_text
@@ -1115,7 +1395,10 @@ def _parse_prescription_block(block: str) -> dict:
     # Infer dose unit
     # -----------------------------------------------------
 
-    if dose_value is not None and dose_unit is None:
+    if (
+        dose_value is not None
+        and dose_unit is None
+    ):
 
         if dosage_form == "tablet":
             dose_unit = "tablet"
@@ -1162,6 +1445,10 @@ def _parse_prescription_block(block: str) -> dict:
         if not instructions:
             instructions = None
 
+    # -----------------------------------------------------
+    # Return parsed medicine
+    # -----------------------------------------------------
+
     return {
         "raw_name": raw_name,
 
@@ -1197,7 +1484,9 @@ def _parse_prescription_block(block: str) -> dict:
 # Main parser
 # =========================================================
 
-def extract_medicines(raw_text: str) -> list[dict]:
+def extract_medicines(
+    raw_text: str,
+) -> list[dict]:
     """
     Extract structured medicine information from OCR text.
 
@@ -1209,6 +1498,7 @@ def extract_medicines(raw_text: str) -> list[dict]:
     - Combination strengths such as 3 + 2 mg
     - 1-0-1 / 1-1-1 dosage schedules
     - once/twice/thrice daily
+    - Natural-language instructions
     - tablet/capsule/ml doses
     - treatment duration
     - labelled Dose/Frequency/Duration/Instructions fields
@@ -1325,10 +1615,14 @@ def extract_medicines(raw_text: str) -> list[dict]:
         # Build medicine identity
         # -------------------------------------------------
 
-        if normalized.get("needs_review"):
+        if normalized.get(
+            "needs_review"
+        ):
 
             name = raw_name
+
             generic_name = raw_name
+
             brand_name = None
 
         else:
@@ -1355,13 +1649,17 @@ def extract_medicines(raw_text: str) -> list[dict]:
         # Normalization confidence
         # -------------------------------------------------
 
-        normalization_confidence = normalized.get(
-            "normalization_confidence",
-            0.0,
+        normalization_confidence = (
+            normalized.get(
+                "normalization_confidence",
+                0.0,
+            )
         )
 
         if (
-            normalized.get("needs_review")
+            normalized.get(
+                "needs_review"
+            )
             and normalization_confidence < 0.85
         ):
 
