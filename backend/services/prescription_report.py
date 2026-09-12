@@ -1,19 +1,24 @@
 """
 Prescription Report
 
-Converts prescription safety analysis into a clean,
-frontend/API-friendly report.
+Builds a clean, structured prescription intelligence report.
+
+This layer:
+    - summarizes existing prescription intelligence
+    - formats safety findings
+    - prepares data for API/frontend/PDF rendering
 
 This layer does NOT:
     - diagnose
     - prescribe
     - confirm uncertain medicines
     - invent missing instructions
-
-It only summarizes existing intelligence and safety findings.
 """
 
 from __future__ import annotations
+
+from datetime import datetime, timezone
+from typing import Any
 
 
 # ---------------------------------------------------------
@@ -120,6 +125,59 @@ ISSUE_LABELS = {
 
 
 # ---------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------
+
+
+def _safe_int(
+    value: Any,
+    default: int = 0,
+) -> int:
+    """
+    Convert a value to int without allowing malformed
+    report data to break report generation.
+    """
+
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _safe_float(
+    value: Any,
+    default: float | None = None,
+) -> float | None:
+    """
+    Convert a value to float safely.
+    """
+
+    if value is None:
+        return default
+
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _clean_text(
+    value: Any,
+    default: str = "",
+) -> str:
+    """
+    Convert arbitrary values into clean report text.
+    """
+
+    if value is None:
+        return default
+
+    text = str(value).strip()
+
+    return text if text else default
+
+
+# ---------------------------------------------------------
 # Issue formatting
 # ---------------------------------------------------------
 
@@ -131,33 +189,35 @@ def _format_issue(
     Convert one safety issue into a clean report item.
     """
 
-    issue_type = issue.get(
-        "type",
+    issue_type = _clean_text(
+        issue.get("type"),
         "unknown_issue",
     )
 
-    severity = issue.get(
-        "severity",
+    severity = _clean_text(
+        issue.get("severity"),
         "low",
-    )
+    ).lower()
 
-    # Keep the report contract strict.
     if severity not in SEVERITY_ORDER:
         severity = "low"
+
+    title = ISSUE_LABELS.get(
+        issue_type,
+        issue_type.replace(
+            "_",
+            " ",
+        ).capitalize(),
+    )
 
     return {
         "type": issue_type,
         "severity": severity,
-        "title": ISSUE_LABELS.get(
-            issue_type,
-            issue_type.replace(
-                "_",
-                " ",
-            ).capitalize(),
-        ),
-        "message": issue.get(
-            "message",
-            "",
+        "title": title,
+        "medicine": issue.get("medicine"),
+        "message": _clean_text(
+            issue.get("message"),
+            "No additional information was provided.",
         ),
     }
 
@@ -174,8 +234,8 @@ def _build_medicine_report(
     Build a clean report for one medicine.
     """
 
-    medicine_name = medicine_result.get(
-        "medicine",
+    medicine_name = _clean_text(
+        medicine_result.get("medicine"),
         "Unknown medicine",
     )
 
@@ -184,9 +244,13 @@ def _build_medicine_report(
         [],
     )
 
+    if not isinstance(issues, list):
+        issues = []
+
     formatted_issues = [
         _format_issue(issue)
         for issue in issues
+        if isinstance(issue, dict)
     ]
 
     formatted_issues.sort(
@@ -217,10 +281,36 @@ def _build_medicine_report(
 
     return {
         "medicine": medicine_name,
+        "generic_name": medicine_result.get(
+            "generic_name"
+        ),
+        "brand_name": medicine_result.get(
+            "brand_name"
+        ),
+        "strength": medicine_result.get(
+            "strength"
+        ),
+        "dose": medicine_result.get(
+            "dose"
+        ),
+        "route": medicine_result.get(
+            "route"
+        ),
+        "frequency": medicine_result.get(
+            "frequency"
+        ),
+        "duration": medicine_result.get(
+            "duration"
+        ),
         "needs_review": bool(
             medicine_result.get(
                 "needs_review",
                 False,
+            )
+        ),
+        "confidence": _safe_float(
+            medicine_result.get(
+                "confidence"
             )
         ),
         "issue_count": len(
@@ -247,35 +337,35 @@ def _build_summary(
     Build prescription-level safety summary.
     """
 
-    medicine_count = int(
+    medicine_count = _safe_int(
         safety_analysis.get(
             "medicine_count",
             0,
         )
     )
 
-    issue_count = int(
+    issue_count = _safe_int(
         safety_analysis.get(
             "issue_count",
             0,
         )
     )
 
-    high_count = int(
+    high_count = _safe_int(
         safety_analysis.get(
             "high_severity_count",
             0,
         )
     )
 
-    medium_count = int(
+    medium_count = _safe_int(
         safety_analysis.get(
             "medium_severity_count",
             0,
         )
     )
 
-    low_count = int(
+    low_count = _safe_int(
         safety_analysis.get(
             "low_severity_count",
             0,
@@ -327,34 +417,132 @@ def _build_summary(
 
 
 # ---------------------------------------------------------
+# Overall status
+# ---------------------------------------------------------
+
+
+def _determine_overall_status(
+    summary: dict,
+) -> str:
+    """
+    Determine the report-level status.
+    """
+
+    high_count = summary[
+        "high_severity_count"
+    ]
+
+    issue_count = summary[
+        "issue_count"
+    ]
+
+    medicine_count = summary[
+        "medicine_count"
+    ]
+
+    if high_count > 0:
+        return "review_required"
+
+    if issue_count > 0:
+        return "review_recommended"
+
+    if medicine_count > 0:
+        return "clear"
+
+    return "no_medicines_detected"
+
+
+# ---------------------------------------------------------
 # Main report builder
 # ---------------------------------------------------------
 
 
 def build_prescription_report(
     safety_analysis: dict,
+    *,
+    prescription_id: str | None = None,
+    file_name: str | None = None,
+    raw_text: str | None = None,
+    analysis_metadata: dict | None = None,
+    interpretation: dict | None = None,
+    prescription_plan: dict | None = None,
 ) -> dict:
     """
     Build the final prescription intelligence report.
 
-    Input:
-        Output from analyze_prescription_safety()
+    Parameters
+    ----------
+    safety_analysis:
+        Output from analyze_prescription_safety().
 
-    Output:
-        Clean, structured report suitable for
-        API responses and frontend rendering.
+    prescription_id:
+        Optional prescription identifier.
+
+    file_name:
+        Original uploaded filename.
+
+    raw_text:
+        OCR-extracted prescription text.
+
+    analysis_metadata:
+        OCR and pipeline metadata.
+
+    interpretation:
+        Structured prescription interpretation.
+
+    prescription_plan:
+        Canonical prescription plan.
+
+    Returns
+    -------
+    dict
+        Structured report suitable for:
+            - API responses
+            - frontend rendering
+            - PDF generation
     """
+
+    if not isinstance(
+        safety_analysis,
+        dict,
+    ):
+        safety_analysis = {}
+
+    if not isinstance(
+        analysis_metadata,
+        dict,
+    ):
+        analysis_metadata = {}
+
+    if not isinstance(
+        interpretation,
+        dict,
+    ):
+        interpretation = {}
+
+    if not isinstance(
+        prescription_plan,
+        dict,
+    ):
+        prescription_plan = {}
 
     medicines = safety_analysis.get(
         "medicines",
         [],
     )
 
+    if not isinstance(
+        medicines,
+        list,
+    ):
+        medicines = []
+
     medicine_reports = [
         _build_medicine_report(
             medicine
         )
         for medicine in medicines
+        if isinstance(medicine, dict)
     ]
 
     summary = _build_summary(
@@ -367,41 +555,51 @@ def build_prescription_report(
             "prescription_issues",
             [],
         )
+        if isinstance(issue, dict)
     ]
 
-    high_count = summary[
-        "high_severity_count"
-    ]
+    overall_status = _determine_overall_status(
+        summary
+    )
 
-    if high_count > 0:
+    safety_status = _clean_text(
+        safety_analysis.get(
+            "safety_status"
+        ),
+        "review_required",
+    )
 
-        overall_status = (
-            "review_required"
+    confidence = _safe_float(
+        prescription_plan.get(
+            "confidence"
         )
+    )
 
-    elif summary["issue_count"] > 0:
-
-        overall_status = (
-            "review_recommended"
-        )
-
-    elif summary["medicine_count"] > 0:
-
-        overall_status = "clear"
-
-    else:
-
-        overall_status = (
-            "no_medicines_detected"
+    if confidence is None:
+        confidence = _safe_float(
+            interpretation.get(
+                "confidence"
+            )
         )
 
     return {
+        "report_version": "1.0",
+        "generated_at": datetime.now(
+            timezone.utc
+        ).isoformat(),
+        "prescription": {
+            "prescription_id": prescription_id,
+            "file_name": file_name,
+            "raw_text": raw_text,
+        },
         "overall_status": overall_status,
-        "safety_status": safety_analysis.get(
-            "safety_status",
-            "review_required",
-        ),
+        "safety_status": safety_status,
+        "confidence": confidence,
         "summary": summary,
         "medicines": medicine_reports,
         "prescription_issues": prescription_issues,
+        "analysis_metadata": analysis_metadata,
+        "interpretation": interpretation,
+        "prescription_plan": prescription_plan,
+        "safety_analysis": safety_analysis,
     }

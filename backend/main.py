@@ -1,11 +1,14 @@
 import logging
 import os
+from io import BytesIO
 from pathlib import Path
 from uuid import uuid4
 
 from PIL import Image
 from backend.routers import auth, users
 from fastapi import Depends, FastAPI, File, HTTPException, UploadFile
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy import func
 from sqlalchemy.orm import Session, selectinload
@@ -20,7 +23,8 @@ from backend.schemas import (
 )
 from backend.services.ocr_service import extract_text_from_image
 from backend.services.prescription_pipeline import process_prescription
-from fastapi.middleware.cors import CORSMiddleware
+from backend.services.prescription_report import build_prescription_report
+from backend.services.pdf_report_generator import generate_prescription_pdf
 
 logger = logging.getLogger(__name__)
 
@@ -76,6 +80,7 @@ app.add_middleware(
 # Root
 # ---------------------------------------------------------
 
+
 @app.get("/")
 def root():
     return {
@@ -89,6 +94,7 @@ def root():
 # Health
 # ---------------------------------------------------------
 
+
 @app.get("/health")
 def health():
     return {
@@ -99,6 +105,7 @@ def health():
 # ---------------------------------------------------------
 # Dashboard statistics
 # ---------------------------------------------------------
+
 
 @app.get(
     "/dashboard/stats",
@@ -144,7 +151,10 @@ def get_dashboard_stats(
     # confidence or any safety flag present.
     needs_review = (
         db.query(func.count(PrescriptionDB.id.distinct()))
-        .join(MedicineDB, MedicineDB.prescription_id == PrescriptionDB.id)
+        .join(
+            MedicineDB,
+            MedicineDB.prescription_id == PrescriptionDB.id,
+        )
         .filter(
             (MedicineDB.normalization_confidence < 0.70)
             | (MedicineDB.extraction_confidence < 0.70)
@@ -162,6 +172,7 @@ def get_dashboard_stats(
     )
 
     recent_list = []
+
     for rx in recent:
         medicine_count = len(rx.medicines)
         safety_count = len(rx.safety_flags or [])
@@ -172,6 +183,7 @@ def get_dashboard_stats(
             for m in rx.medicines
             if m.normalization_confidence is not None
         ]
+
         avg_confidence = (
             round(sum(confidences) / len(confidences), 2)
             if confidences
@@ -200,6 +212,7 @@ def get_dashboard_stats(
 # ---------------------------------------------------------
 # Create prescription manually
 # ---------------------------------------------------------
+
 
 @app.post(
     "/prescriptions",
@@ -233,7 +246,6 @@ def create_prescription(
     )
 
     for medicine in prescription.medicines:
-
         strength_value = medicine.strength_value
 
         if strength_value is not None:
@@ -245,7 +257,9 @@ def create_prescription(
             brand_name=medicine.brand_name,
             strength_value=strength_value,
             strength_components=getattr(
-                medicine, "strength_components", None,
+                medicine,
+                "strength_components",
+                None,
             ),
             strength_unit=medicine.strength_unit,
             dose_value=medicine.dose_value,
@@ -253,7 +267,9 @@ def create_prescription(
             daily_dose_value=medicine.daily_dose_value,
             daily_dose_unit=medicine.daily_dose_unit,
             daily_dose_components=getattr(
-                medicine, "daily_dose_components", None,
+                medicine,
+                "daily_dose_components",
+                None,
             ),
             route=medicine.route,
             frequency_value=medicine.frequency_value,
@@ -292,6 +308,7 @@ def create_prescription(
 # ---------------------------------------------------------
 # Upload prescription image
 # ---------------------------------------------------------
+
 
 @app.post(
     "/prescriptions/upload",
@@ -336,7 +353,7 @@ async def upload_prescription(
             status_code=413,
             detail=(
                 f"File exceeds maximum allowed size of "
-                f"{MAX_UPLOAD_BYTES // (1024*1024)} MB"
+                f"{MAX_UPLOAD_BYTES // (1024 * 1024)} MB"
             ),
         )
 
@@ -347,7 +364,9 @@ async def upload_prescription(
     except Exception as exc:
         raise HTTPException(
             status_code=500,
-            detail=f"Failed to save uploaded file: {str(exc)}",
+            detail=(
+                f"Failed to save uploaded file: {str(exc)}"
+            ),
         )
 
     try:
@@ -357,24 +376,36 @@ async def upload_prescription(
     except Exception as exc:
         # Remove the corrupted file
         file_path.unlink(missing_ok=True)
+
         raise HTTPException(
             status_code=400,
-            detail=f"Invalid or corrupted image file: {str(exc)}",
+            detail=(
+                f"Invalid or corrupted image file: {str(exc)}"
+            ),
         )
 
     try:
         raw_text = extract_text_from_image(image)
 
     except Exception as exc:
-        logger.error("OCR processing error: %s", exc, exc_info=True)
+        logger.error(
+            "OCR processing error: %s",
+            exc,
+            exc_info=True,
+        )
+
         raise HTTPException(
             status_code=500,
             detail=f"OCR processing failed: {str(exc)}",
         )
 
+    # -----------------------------------------------------
+    # OCR failure
+    # -----------------------------------------------------
+
     if not raw_text or not raw_text.strip():
-        # Store prescription with empty OCR result
         prescription_id = f"RX-{file_id.hex[:8].upper()}"
+
         db_prescription = PrescriptionDB(
             prescription_id=prescription_id,
             raw_text="",
@@ -394,13 +425,15 @@ async def upload_prescription(
                 }
             ],
         )
+
         db.add(db_prescription)
         db.commit()
         db.refresh(db_prescription)
+
         return {
             "message": (
-                "Prescription uploaded but OCR could not extract any text. "
-                "Please review the image quality."
+                "Prescription uploaded but OCR could not extract "
+                "any text. Please review the image quality."
             ),
             "prescription_id": prescription_id,
             "file_name": file.filename,
@@ -419,18 +452,34 @@ async def upload_prescription(
             },
         }
 
+    # -----------------------------------------------------
+    # Prescription intelligence pipeline
+    # -----------------------------------------------------
+
     try:
         analysis = process_prescription(raw_text)
 
     except Exception as exc:
-        logger.error("Pipeline error: %s", exc, exc_info=True)
+        logger.error(
+            "Pipeline error: %s",
+            exc,
+            exc_info=True,
+        )
+
         raise HTTPException(
             status_code=500,
-            detail=f"Prescription processing failed: {str(exc)}",
+            detail=(
+                f"Prescription processing failed: {str(exc)}"
+            ),
         )
 
     medicines = analysis.get("medicines", [])
-    safety_flags = analysis.get("safety_flags", [])
+
+    safety_flags = analysis.get(
+        "safety_flags",
+        [],
+    )
+
     analysis_metadata = analysis.get(
         "analysis_metadata",
         {},
@@ -451,7 +500,6 @@ async def upload_prescription(
         {},
     )
 
-
     prescription_id = f"RX-{file_id.hex[:8].upper()}"
 
     db_prescription = PrescriptionDB(
@@ -465,8 +513,8 @@ async def upload_prescription(
     )
 
     for medicine in medicines:
-
         strength_value = medicine.get("strength_value")
+
         if strength_value is not None:
             strength_value = str(strength_value)
 
@@ -476,20 +524,42 @@ async def upload_prescription(
             brand_name=medicine.get("brand_name"),
             strength_value=strength_value,
             strength_unit=medicine.get("strength_unit"),
-            strength_components=medicine.get("strength_components") or [],
+            strength_components=(
+                medicine.get("strength_components") or []
+            ),
             dose_value=medicine.get("dose_value"),
             dose_unit=medicine.get("dose_unit"),
-            daily_dose_value=medicine.get("daily_dose_value"),
-            daily_dose_unit=medicine.get("daily_dose_unit"),
-            daily_dose_components=medicine.get("daily_dose_components") or [],
+            daily_dose_value=medicine.get(
+                "daily_dose_value"
+            ),
+            daily_dose_unit=medicine.get(
+                "daily_dose_unit"
+            ),
+            daily_dose_components=(
+                medicine.get("daily_dose_components") or []
+            ),
             route=medicine.get("route"),
-            frequency_value=medicine.get("frequency_value"),
-            frequency_unit=medicine.get("frequency_unit"),
-            duration_value=medicine.get("duration_value"),
-            duration_unit=medicine.get("duration_unit"),
-            instructions=medicine.get("instructions"),
-            extraction_confidence=medicine.get("extraction_confidence"),
-            normalization_confidence=medicine.get("normalization_confidence"),
+            frequency_value=medicine.get(
+                "frequency_value"
+            ),
+            frequency_unit=medicine.get(
+                "frequency_unit"
+            ),
+            duration_value=medicine.get(
+                "duration_value"
+            ),
+            duration_unit=medicine.get(
+                "duration_unit"
+            ),
+            instructions=medicine.get(
+                "instructions"
+            ),
+            extraction_confidence=medicine.get(
+                "extraction_confidence"
+            ),
+            normalization_confidence=medicine.get(
+                "normalization_confidence"
+            ),
         )
 
         db_prescription.medicines.append(db_medicine)
@@ -501,17 +571,20 @@ async def upload_prescription(
 
     except Exception as exc:
         db.rollback()
+
         raise HTTPException(
             status_code=500,
             detail=f"Failed to save prescription: {str(exc)}",
         )
 
     if medicines:
-        message = "Prescription uploaded and analyzed successfully"
+        message = (
+            "Prescription uploaded and analyzed successfully"
+        )
     else:
         message = (
-            "Prescription uploaded, but no medicines could be reliably "
-            "extracted. Manual verification is required."
+            "Prescription uploaded, but no medicines could be "
+            "reliably extracted. Manual verification is required."
         )
 
     return {
@@ -536,6 +609,7 @@ async def upload_prescription(
 # Prescription history (paginated)
 # ---------------------------------------------------------
 
+
 @app.get(
     "/prescriptions",
     response_model=list[PrescriptionResponse],
@@ -559,8 +633,183 @@ def list_prescriptions(
 
 
 # ---------------------------------------------------------
+# Generate prescription PDF report
+# ---------------------------------------------------------
+
+
+@app.get(
+    "/prescriptions/{prescription_id}/report",
+    tags=["Prescriptions"],
+)
+def download_prescription_report(
+    prescription_id: str,
+    db: Session = Depends(get_db),
+):
+    """
+    Generate and return a PDF intelligence report for a prescription.
+
+    The report is generated from the stored OCR text so that the same
+    prescription intelligence pipeline is used consistently without
+    requiring any database schema changes.
+    """
+
+    prescription = (
+        db.query(PrescriptionDB)
+        .options(selectinload(PrescriptionDB.medicines))
+        .filter(
+            PrescriptionDB.prescription_id
+            == prescription_id
+        )
+        .first()
+    )
+
+    if not prescription:
+        raise HTTPException(
+            status_code=404,
+            detail="Prescription not found",
+        )
+
+    # -----------------------------------------------------
+    # Re-run the intelligence pipeline from stored OCR text
+    # -----------------------------------------------------
+
+    raw_text = prescription.raw_text or ""
+
+    if raw_text.strip():
+        try:
+            analysis = process_prescription(raw_text)
+
+        except Exception as exc:
+            logger.error(
+                "Report pipeline error for %s: %s",
+                prescription_id,
+                exc,
+                exc_info=True,
+            )
+
+            raise HTTPException(
+                status_code=500,
+                detail=(
+                    "Unable to generate the prescription analysis "
+                    f"for the report: {str(exc)}"
+                ),
+            )
+
+        analysis_metadata = analysis.get(
+            "analysis_metadata",
+            {},
+        )
+
+        interpretation = analysis.get(
+            "interpretation",
+            {},
+        )
+
+        prescription_plan = analysis.get(
+            "prescription_plan",
+            {},
+        )
+
+        safety_analysis = analysis.get(
+            "safety_analysis",
+            {},
+        )
+
+    else:
+        # -------------------------------------------------
+        # OCR-failed prescription
+        # -------------------------------------------------
+
+        analysis_metadata = {
+            "ocr_quality": "failed",
+            "ocr_text_length": 0,
+            "medicine_count": 0,
+            "needs_review": True,
+        }
+
+        interpretation = {
+            "status": "review_required",
+            "medicines": [],
+        }
+
+        prescription_plan = {
+            "status": "review_required",
+            "medicines": [],
+        }
+
+        safety_analysis = {
+            "safety_status": "review_required",
+            "overall_status": "review_required",
+            "confidence": 0.0,
+            "medicines": [],
+            "prescription_issues": [
+                {
+                    "type": "ocr_empty",
+                    "severity": "error",
+                    "medicine": None,
+                    "title": "OCR extraction failed",
+                    "message": (
+                        "OCR could not extract any prescription text. "
+                        "Manual verification is required."
+                    ),
+                }
+            ],
+        }
+
+    # -----------------------------------------------------
+    # Build structured report
+    # -----------------------------------------------------
+
+    report = build_prescription_report(
+        safety_analysis,
+        prescription_id=prescription.prescription_id,
+        file_name=prescription.file_name,
+        raw_text=raw_text,
+        analysis_metadata=analysis_metadata,
+        interpretation=interpretation,
+        prescription_plan=prescription_plan,
+    )
+
+    # -----------------------------------------------------
+    # Generate PDF
+    # -----------------------------------------------------
+
+    try:
+        pdf_bytes = generate_prescription_pdf(report)
+
+    except Exception as exc:
+        logger.error(
+            "PDF generation error for %s: %s",
+            prescription_id,
+            exc,
+            exc_info=True,
+        )
+
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to generate PDF report: {str(exc)}",
+        )
+
+    filename = (
+        f"{prescription.prescription_id}"
+        "-prescription-intelligence-report.pdf"
+    )
+
+    return StreamingResponse(
+        BytesIO(pdf_bytes),
+        media_type="application/pdf",
+        headers={
+            "Content-Disposition": (
+                f'attachment; filename="{filename}"'
+            )
+        },
+    )
+
+
+# ---------------------------------------------------------
 # Get prescription by ID
 # ---------------------------------------------------------
+
 
 @app.get(
     "/prescriptions/{prescription_id}",
@@ -575,7 +824,8 @@ def get_prescription(
         db.query(PrescriptionDB)
         .options(selectinload(PrescriptionDB.medicines))
         .filter(
-            PrescriptionDB.prescription_id == prescription_id
+            PrescriptionDB.prescription_id
+            == prescription_id
         )
         .first()
     )
@@ -593,6 +843,7 @@ def get_prescription(
 # Medicine lookup
 # ---------------------------------------------------------
 
+
 @app.get(
     "/medicines/lookup",
     tags=["Medicines"],
@@ -605,6 +856,7 @@ def lookup_medicine(
     Look up medicines by name fragment.
     Returns matching medicines from the analysis history.
     """
+
     if not q or len(q.strip()) < 2:
         raise HTTPException(
             status_code=400,
@@ -614,7 +866,9 @@ def lookup_medicine(
     results = (
         db.query(MedicineDB)
         .filter(
-            MedicineDB.name.ilike(f"%{q.strip()}%")
+            MedicineDB.name.ilike(
+                f"%{q.strip()}%"
+            )
         )
         .limit(20)
         .all()
