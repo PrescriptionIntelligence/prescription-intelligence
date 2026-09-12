@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useState } from "react";
 import { useParams } from "next/navigation";
 
 // =========================================================
@@ -84,14 +84,12 @@ function formatDate(iso: string): string {
   }
 }
 
-function confidencePercent(
-  val: number | null | undefined
-): string {
-  if (val === null || val === undefined) {
-    return "—";
-  }
+function confidencePercent(value: number | null) {
+  if (value === null || value === undefined) return "—";
 
-  return `${Math.round(val * 100)}%`;
+  const normalized = value <= 1 ? value * 100 : value;
+
+  return `${Math.round(normalized)}%`;
 }
 
 function confidenceBarColor(
@@ -136,6 +134,16 @@ function getOverallConfidence(
   );
 }
 
+function isMedicineVerified(medicine: Medicine): boolean {
+  const confidence = getOverallConfidence(medicine);
+
+  return (
+    !medicine.needs_review &&
+    confidence !== null &&
+    confidence >= 0.85
+  );
+}
+
 function severityStyle(
   severity: string
 ): {
@@ -145,6 +153,7 @@ function severityStyle(
   background: string;
   text: string;
   iconBackground: string;
+  badge: string;
 } {
   switch (severity) {
     case "high":
@@ -156,6 +165,7 @@ function severityStyle(
         background: "bg-[#fff8f8]",
         text: "text-[#742525]",
         iconBackground: "bg-[#f8e4e4]",
+        badge: "bg-[#fee2e2] text-[#991b1b] border border-[#fecaca]",
       };
 
     case "warning":
@@ -166,6 +176,7 @@ function severityStyle(
         background: "bg-[#fffdf7]",
         text: "text-[#725719]",
         iconBackground: "bg-[#f7efd9]",
+        badge: "bg-[#fef3c7] text-[#92400e] border border-[#fcd34d]",
       };
 
     default:
@@ -176,6 +187,7 @@ function severityStyle(
         background: "bg-[#f8fafc]",
         text: "text-[#3c536b]",
         iconBackground: "bg-[#e8eef5]",
+        badge: "bg-[#e2e8f0] text-[#334155] border border-[#cbd5e1]",
       };
   }
 }
@@ -579,7 +591,8 @@ export default function AnalysisDetailPage() {
 
   const needsReview =
     medicineReviewRequired.length > 0 ||
-    prescriptionSafetyReviewRequired;
+    prescriptionSafetyReviewRequired ||
+    ocrFlags.length > 0;
 
   const imageUrl = getImageUrl(
     prescription.file_path
@@ -587,18 +600,7 @@ export default function AnalysisDetailPage() {
 
   const verifiedMedicines =
     prescription.medicines.filter(
-      (medicine) => {
-        const confidence =
-          getOverallConfidence(
-            medicine
-          );
-
-        return (
-          !medicine.needs_review &&
-          confidence !== null &&
-          confidence >= 0.85
-        );
-      }
+      isMedicineVerified
     ).length;
 
   const averageConfidence =
@@ -796,28 +798,55 @@ export default function AnalysisDetailPage() {
           {/* Review banner */}
 
           {needsReview && (
-            <div className="border-t border-[#eadfbd] bg-[#fffaf0] px-5 py-3.5 sm:px-7">
-              <div className="flex items-start gap-3">
-                <div className="mt-0.5 grid h-7 w-7 shrink-0 place-items-center rounded-full bg-[#f5e9c8] text-xs font-bold text-[#775d1e]">
+            <div className="border-t border-red-100 bg-red-50/50 px-5 py-4 sm:px-7">
+              <div className="flex items-start gap-3.5">
+                <div className="mt-0.5 grid h-8 w-8 shrink-0 place-items-center rounded-full bg-red-100 text-sm font-bold text-red-700">
                   !
                 </div>
 
-                <div>
-                  <p className="text-xs font-semibold text-[#665018]">
-                    Human review recommended
+                <div className="min-w-0 flex-1">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <p className="text-xs font-bold uppercase tracking-[0.08em] text-red-800">
+                      Human review recommended
+                    </p>
+
+                    {highPriorityFlags.length > 0 && (
+                      <span className="rounded-full bg-red-100 px-2 py-0.5 text-[10px] font-semibold text-red-700">
+                        {highPriorityFlags.length} high priority
+                      </span>
+                    )}
+                  </div>
+
+                  <p className="mt-1 text-xs leading-5 text-red-900/70">
+                    {highPriorityFlags.length > 0
+                      ? `${highPriorityFlags.length} high-priority safety finding${
+                          highPriorityFlags.length === 1 ? "" : "s"
+                        } detected. Review the medication safety findings before dispensing or clinical use.`
+                      : "This analysis contains findings that require verification by a qualified healthcare professional before dispensing or clinical use."}
                   </p>
 
-                  <p className="mt-0.5 text-[11px] leading-5 text-[#85733e]">
-                    This analysis contains one or
-                    more findings that require
-                    verification by a qualified
-                    healthcare professional before
-                    dispensing or clinical use.
-                  </p>
+                  {medicationFlags.some(
+                    (flag) =>
+                      flag.type === "drug_interaction" ||
+                      !!flag.interaction_id
+                  ) && (
+                    <div className="mt-3 flex flex-wrap items-center gap-2 text-[11px]">
+                      <span className="font-semibold text-red-800">
+                        Medication interaction detected
+                      </span>
+
+                      <span className="text-red-300">•</span>
+
+                      <span className="text-red-800/70">
+                        Review the Safety tab for details
+                      </span>
+                    </div>
+                  )}
                 </div>
               </div>
             </div>
           )}
+
         </section>
 
         {/* =================================================
@@ -1307,30 +1336,57 @@ export default function AnalysisDetailPage() {
 
                 <section className="overflow-hidden rounded-2xl border border-[#dfe6e1] bg-white shadow-[0_5px_25px_rgba(28,46,36,0.035)]">
 
-                  <div className="flex flex-col gap-2 border-b border-[#edf0ee] px-5 py-4 sm:flex-row sm:items-center sm:justify-between">
-                    <div>
-                      <p className="text-xs font-semibold text-[#344139]">
-                        Extracted prescription text
-                      </p>
+                  {/* OCR header */}
+                  <div className="border-b border-[#edf0ee] px-5 py-4 sm:px-6">
+                    <div className="flex flex-wrap items-start justify-between gap-3">
 
-                      <p className="mt-0.5 text-[10px] text-[#9aa39e]">
-                        Raw text returned by the OCR pipeline
-                      </p>
+                      <div className="min-w-0">
+                        <div className="flex items-center gap-2">
+                          <div className="grid h-7 w-7 shrink-0 place-items-center rounded-lg bg-[#edf6f1] text-[10px] font-bold text-[#35664d]">
+                            OCR
+                          </div>
+
+                          <p className="text-xs font-bold text-[#26332c]">
+                            Extracted prescription text
+                          </p>
+                        </div>
+
+                        <p className="mt-1 pl-9 text-[10px] leading-4 text-[#89938d]">
+                          Text recognized from the uploaded prescription image.
+                        </p>
+                      </div>
+
+                      <span className="inline-flex shrink-0 items-center gap-1.5 rounded-md border border-[#dce7e0] bg-[#f7faf8] px-2.5 py-1 text-[9px] font-semibold uppercase tracking-[0.08em] text-[#617169]">
+                        <span className="h-1.5 w-1.5 rounded-full bg-[#4d8063]" />
+                        OCR processed
+                      </span>
+
                     </div>
-
-                    <span className="rounded-md bg-[#f2f5f3] px-2 py-1 font-mono text-[9px] text-[#7c8881]">
-                      OCR
-                    </span>
                   </div>
 
-                  <div className="p-5">
+                  {/* OCR document */}
+                  <div className="p-5 sm:p-6">
 
                     {prescription.raw_text ? (
-                      <pre className="overflow-x-auto whitespace-pre-wrap rounded-xl border border-[#e5eae7] bg-[#fafcfb] p-5 font-mono text-[11px] leading-6 text-[#3c4942]">
-                        {
-                          prescription.raw_text
-                        }
-                      </pre>
+                      <div className="overflow-hidden rounded-xl border border-[#e1e7e3] bg-[#fcfdfc]">
+
+                        {/* Document top bar */}
+                        <div className="flex items-center justify-between border-b border-[#edf1ee] bg-[#f7f9f8] px-4 py-2.5">
+                          <span className="text-[9px] font-semibold uppercase tracking-[0.1em] text-[#87928b]">
+                            Recognition output
+                          </span>
+
+                          <span className="font-mono text-[9px] text-[#a0aaa5]">
+                            READ-ONLY
+                          </span>
+                        </div>
+
+                        {/* Recognized text */}
+                        <pre className="max-h-[520px] overflow-auto whitespace-pre-wrap break-words px-5 py-5 font-mono text-[11px] leading-7 text-[#34423a] sm:px-6">
+                          {prescription.raw_text}
+                        </pre>
+
+                      </div>
                     ) : (
                       <EmptyState
                         icon="OCR"
@@ -1339,16 +1395,30 @@ export default function AnalysisDetailPage() {
                       />
                     )}
                   </div>
+
                 </section>
 
-                <div className="rounded-xl border border-[#dfe6e1] bg-[#fafcfb] px-4 py-3 text-[10px] leading-5 text-[#7c8881]">
-                  OCR output is provided for
-                  transparency and verification.
-                  Extracted text may contain
-                  recognition errors and should
-                  always be checked against the
-                  original prescription image.
+                {/* Verification notice */}
+                <div className="flex items-start gap-3 rounded-xl border border-[#e0e7e2] bg-[#f7faf8] px-4 py-3.5">
+
+                  <div className="mt-0.5 grid h-6 w-6 shrink-0 place-items-center rounded-full bg-[#e8f2ec] text-[10px] font-bold text-[#46735a]">
+                    i
+                  </div>
+
+                  <div>
+                    <p className="text-[10px] font-semibold text-[#536159]">
+                      Verify against the original prescription
+                    </p>
+
+                    <p className="mt-0.5 text-[10px] leading-5 text-[#7d8982]">
+                      OCR output is shown for transparency and verification.
+                      Recognition errors can occur, so extracted text should
+                      always be checked against the original prescription image.
+                    </p>
+                  </div>
+
                 </div>
+
               </div>
             )}
           </section>
@@ -1389,40 +1459,67 @@ function MetricCard({
   icon: string;
   emphasis?: "neutral" | "danger";
 }) {
+  const isDanger = emphasis === "danger";
+
   return (
-    <div className="rounded-2xl border border-[#dfe6e1] bg-white p-5 shadow-[0_5px_25px_rgba(28,46,36,0.03)]">
+    <div
+      className={
+        isDanger
+          ? "relative overflow-hidden rounded-2xl border border-[#e8cccc] bg-white p-5 shadow-[0_5px_25px_rgba(28,46,36,0.03)]"
+          : "relative overflow-hidden rounded-2xl border border-[#dfe6e1] bg-white p-5 shadow-[0_5px_25px_rgba(28,46,36,0.03)]"
+      }
+    >
+      {/* Clinical accent */}
+      <div
+        className={
+          isDanger
+            ? "absolute inset-y-0 left-0 w-0.5 bg-[#a74646]"
+            : "absolute inset-y-0 left-0 w-0.5 bg-[#d8e5dc]"
+        }
+      />
 
-      <div className="flex items-start justify-between gap-3">
+      <div className="flex items-start justify-between gap-4">
 
-        <div>
-          <p className="text-[10px] font-semibold uppercase tracking-[0.13em] text-[#8b9690]">
+        <div className="min-w-0">
+
+          <p className="text-[9px] font-bold uppercase tracking-[0.14em] text-[#8b9690]">
             {label}
           </p>
 
+          <div className="mt-2 flex items-baseline gap-2">
+            <p
+              className={
+                isDanger
+                  ? "text-[28px] font-semibold leading-none tracking-[-0.04em] text-[#8a3434]"
+                  : "text-[28px] font-semibold leading-none tracking-[-0.04em] text-[#17211d]"
+              }
+            >
+              {value}
+            </p>
+          </div>
+
           <p
             className={
-              emphasis === "danger"
-                ? "mt-2 text-2xl font-semibold tracking-[-0.03em] text-[#842f2f]"
-                : "mt-2 text-2xl font-semibold tracking-[-0.03em] text-[#17211d]"
+              isDanger
+                ? "mt-2 text-[10px] font-medium text-[#8a3434]"
+                : "mt-2 text-[10px] text-[#7d8982]"
             }
           >
-            {value}
-          </p>
-
-          <p className="mt-1 text-[10px] text-[#8b9690]">
             {detail}
           </p>
         </div>
 
         <div
           className={
-            emphasis === "danger"
-              ? "grid h-8 w-8 place-items-center rounded-lg bg-[#fff0f0] text-[11px] font-semibold text-[#8a3434]"
-              : "grid h-8 w-8 place-items-center rounded-lg bg-[#f0f4f1] text-[10px] font-semibold text-[#53645a]"
+            isDanger
+              ? "grid h-8 w-8 shrink-0 place-items-center rounded-lg border border-[#efdada] bg-[#fff5f5] text-[10px] font-bold text-[#a74646]"
+              : "grid h-8 w-8 shrink-0 place-items-center rounded-lg border border-[#e1e9e4] bg-[#f7faf8] text-[10px] font-semibold text-[#53645a]"
           }
+          aria-hidden="true"
         >
           {icon}
         </div>
+
       </div>
     </div>
   );
@@ -1533,223 +1630,205 @@ function SectionHeading({
 // Medicine card
 // =========================================================
 
-function MedicineCard({
-  medicine,
-}: {
-  medicine: Medicine;
-}) {
-  const status =
-    medicineStatusStyle(
-      medicine
-    );
+function MedicineCard({ medicine }: { medicine: Medicine }) {
+  const rawConfidence = getOverallConfidence(medicine);
 
-  const confidence =
-    getOverallConfidence(
-      medicine
-    );
+  const confidenceDisplay =
+    rawConfidence === null
+      ? "—"
+      : confidencePercent(rawConfidence);
+
+  const extractionNeedsReview =
+    medicine.needs_review === true ||
+    (rawConfidence !== null && rawConfidence < 0.70);
+
+  const isVerified = isMedicineVerified(medicine);
+
+  const cardBorder = isVerified
+    ? "border-[#CBE0D3]"
+    : extractionNeedsReview
+      ? "border-[#E5D4A8]"
+      : "border-[#DFE6E1]";
+
+  const statusStyle = isVerified
+    ? "border border-[#CBE0D3] bg-[#EDF8F1] text-[#35664D]"
+    : "border border-[#E5D4A8] bg-[#FFF7DF] text-[#A47B2C]";
+
+  const iconStyle = isVerified
+    ? "border-[#CBE0D3] bg-[#EDF8F1] text-[#35664D]"
+    : "border-[#E5D4A8] bg-[#FFF7DF] text-[#A47B2C]";
 
   return (
-    <article className="overflow-hidden rounded-2xl border border-[#dfe6e1] bg-white shadow-[0_5px_25px_rgba(28,46,36,0.035)]">
-
-      {/* Medicine header */}
-
-      <div className="border-b border-[#edf0ee] px-5 py-5 sm:px-6">
-
-        <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
-
-          <div className="min-w-0">
-
-            <div className="flex items-center gap-2">
-              <span className="grid h-8 w-8 shrink-0 place-items-center rounded-lg bg-[#edf3ef] text-[10px] font-semibold text-[#3e5c4b]">
-                Rx
-              </span>
-
-              <div>
-                <h3 className="text-base font-semibold tracking-[-0.015em] text-[#1c2821]">
-                  {medicine.generic_name ||
-                    medicine.name}
-                </h3>
-
-                {medicine.brand_name &&
-                  medicine.brand_name !==
-                    medicine.generic_name && (
-                    <p className="mt-0.5 text-[10px] text-[#8b9690]">
-                      Brand:{" "}
-                      {medicine.brand_name}
-                    </p>
-                  )}
-              </div>
+    <article
+      className={`overflow-hidden rounded-2xl border bg-white shadow-sm transition-shadow hover:shadow-md ${cardBorder}`}
+    >
+      {/* Medication identity */}
+      <div className="border-b border-[#DFE6E1] px-5 py-5">
+        <div className="flex items-start justify-between gap-4">
+          <div className="flex min-w-0 items-start gap-3.5">
+            <div
+              className={`flex h-11 w-11 shrink-0 items-center justify-center rounded-xl border ${iconStyle}`}
+            >
+              <span className="text-base font-semibold">Rx</span>
             </div>
 
-            {medicine.raw_text && (
-              <div className="mt-3 rounded-lg bg-[#fafcfb] px-3 py-2">
-                <span className="text-[9px] font-semibold uppercase tracking-[0.1em] text-[#a0aaa5]">
-                  OCR
+            <div className="min-w-0">
+              <div className="flex flex-wrap items-center gap-2">
+                <h3 className="text-lg font-semibold tracking-tight text-[#17211D]">
+                  {medicine.name}
+                </h3>
+
+                <span
+                  className={`inline-flex items-center gap-1 rounded-full px-2.5 py-1 text-[11px] font-semibold ${statusStyle}`}
+                >
+                  <span>{isVerified ? "✓" : "!"}</span>
+                  {isVerified ? "Verified" : "Review"}
+                </span>
+              </div>
+
+              {medicine.generic_name &&
+                medicine.generic_name.toLowerCase() !==
+                  medicine.name.toLowerCase() && (
+                  <p className="mt-1 text-sm text-[#7C8881]">
+                    {medicine.generic_name}
+                  </p>
+                )}
+
+              <div className="mt-3 flex flex-wrap items-baseline gap-x-2 gap-y-1">
+                <span className="text-xl font-semibold tracking-tight text-[#17211D]">
+                  {medicine.strength_value && medicine.strength_unit
+                    ? `${medicine.strength_value} ${medicine.strength_unit}`
+                    : medicine.strength_value || "Strength not available"}
                 </span>
 
-                <p className="mt-1 font-mono text-[10px] leading-5 text-[#6e7973]">
-                  “{medicine.raw_text}”
-                </p>
+                {medicine.dose_unit && (
+                  <span className="text-sm text-[#7C8881]">
+                    {medicine.dose_unit}
+                  </span>
+                )}
               </div>
-            )}
+            </div>
           </div>
 
-          <span
-            className={`inline-flex w-fit items-center gap-1.5 rounded-full border px-2.5 py-1.5 text-[9px] font-semibold ${status.cls}`}
-          >
-            <span
-              className={`h-1.5 w-1.5 rounded-full ${status.dot}`}
-            />
+          <div className="shrink-0 text-right">
+            <p className="text-[10px] font-semibold uppercase tracking-[0.12em] text-[#9AA39E]">
+              Extraction
+            </p>
 
-            {status.label}
-          </span>
+            <p className="mt-1 text-sm font-semibold text-[#526158]">
+              {confidenceDisplay}
+            </p>
+          </div>
         </div>
       </div>
 
-      {/* Details */}
-
-      <div className="px-5 py-5 sm:px-6">
-
-        <div className="grid gap-px overflow-hidden rounded-xl border border-[#e7ece9] bg-[#e7ece9] sm:grid-cols-2 lg:grid-cols-3">
-
-          <MedDetail
-            label="Strength"
-            value={
-              medicine.strength_value !=
-              null
-                ? `${medicine.strength_value}${
-                    medicine.strength_unit
-                      ? ` ${medicine.strength_unit}`
-                      : ""
-                  }`
-                : null
-            }
-          />
-
+      {/* Prescription details */}
+      <div className="px-5 py-5">
+        <div className="grid grid-cols-2 gap-px overflow-hidden rounded-xl border border-[#DFE6E1] bg-[#DFE6E1] sm:grid-cols-3 lg:grid-cols-4">
           <MedDetail
             label="Dose"
             value={
-              medicine.dose_value !=
-              null
-                ? `${medicine.dose_value}${
-                    medicine.dose_unit
-                      ? ` ${medicine.dose_unit}`
-                      : ""
-                  }`
-                : null
+              medicine.dose_value && medicine.dose_unit
+                ? `${medicine.dose_value} ${medicine.dose_unit}`
+                : "—"
             }
+            emphasized
           />
 
           <MedDetail
             label="Route"
-            value={medicine.route}
+            value={medicine.route || "—"}
           />
 
           <MedDetail
             label="Frequency"
             value={
-              medicine.frequency_value !=
-              null
-                ? `${medicine.frequency_value}×/${
-                    medicine.frequency_unit ||
-                    "day"
-                  }`
-                : null
+              medicine.frequency_value && medicine.frequency_unit
+                ? `${medicine.frequency_value}× / ${medicine.frequency_unit}`
+                : "—"
             }
           />
 
           <MedDetail
             label="Duration"
             value={
-              medicine.duration_value !=
-              null
-                ? `${medicine.duration_value} ${
-                    medicine.duration_unit ||
-                    "days"
-                  }`
-                : null
+              medicine.duration_value && medicine.duration_unit
+                ? `${medicine.duration_value} ${medicine.duration_unit}`
+                : "—"
             }
           />
 
           <MedDetail
             label="Daily dose"
             value={
-              medicine.daily_dose_value !=
-              null
-                ? `${medicine.daily_dose_value} ${
-                    medicine.daily_dose_unit ||
-                    "mg"
-                  }`
-                : null
+              medicine.daily_dose_value && medicine.daily_dose_unit
+                ? `${medicine.daily_dose_value} ${medicine.daily_dose_unit}`
+                : "—"
             }
+          />
+
+          <MedDetail
+            label="Normalization"
+            value={confidencePercent(medicine.normalization_confidence)}
+          />
+
+          <MedDetail
+            label="Status"
+            value={isVerified ? "Verified" : "Review required"}
           />
         </div>
 
+        {/* Patient directions */}
         {medicine.instructions && (
-          <div className="mt-4 rounded-xl border border-[#dfe9e2] bg-[#f6faf7] px-4 py-3">
-            <p className="text-[9px] font-semibold uppercase tracking-[0.1em] text-[#718078]">
-              Instructions
-            </p>
+          <div className="mt-5 rounded-xl border border-[#DFE6E1] bg-[#FAFCFB] px-4 py-4">
+            <div className="flex items-center gap-2">
+              <span className="text-sm text-[#35664D]">▸</span>
 
-            <p className="mt-1 text-[11px] leading-5 text-[#526158]">
+              <p className="text-[11px] font-semibold uppercase tracking-[0.12em] text-[#7C8881]">
+                Patient directions
+              </p>
+            </div>
+
+            <p className="mt-2 text-sm leading-6 text-[#526158]">
               {medicine.instructions}
             </p>
           </div>
         )}
 
-        {/* Confidence */}
-
-        <div className="mt-5">
-
-          <div className="mb-3 flex items-center justify-between">
-            <p className="text-[10px] font-semibold uppercase tracking-[0.11em] text-[#89948e]">
+        {/* Extraction quality */}
+        <div className="mt-5 border-t border-[#DFE6E1] pt-4">
+          <div className="flex items-center justify-between">
+            <span className="text-xs font-medium text-[#7C8881]">
               Extraction confidence
-            </p>
+            </span>
 
-            <span className="text-[10px] font-semibold text-[#4d5d54]">
-              {confidencePercent(
-                medicine.extraction_confidence
-              )}
+            <span className="text-xs font-semibold text-[#526158]">
+              {confidenceDisplay}
             </span>
           </div>
 
-          <ConfidenceBar
-            value={
-              medicine.extraction_confidence
-            }
-          />
-
-          <div className="mt-4 mb-3 flex items-center justify-between">
-            <p className="text-[10px] font-semibold uppercase tracking-[0.11em] text-[#89948e]">
-              Normalization confidence
-            </p>
-
-            <span className="text-[10px] font-semibold text-[#4d5d54]">
-              {confidencePercent(
-                medicine.normalization_confidence
-              )}
-            </span>
+          <div className="mt-2">
+            <ConfidenceBar value={rawConfidence} />
           </div>
-
-          <ConfidenceBar
-            value={
-              medicine.normalization_confidence
-            }
-          />
         </div>
 
-        {confidence !== null && (
-          <div className="mt-4 flex items-center justify-between rounded-xl bg-[#fafcfb] px-3 py-2.5">
-            <span className="text-[10px] text-[#8b9690]">
-              Combined confidence
+        {/* Human review */}
+        {extractionNeedsReview && !isVerified && (
+          <div className="mt-4 flex items-start gap-2.5 rounded-xl border border-[#E5D4A8] bg-[#FFF7DF] px-3.5 py-3">
+            <span className="mt-0.5 text-sm font-semibold text-[#A47B2C]">
+              !
             </span>
 
-            <span className="text-[11px] font-semibold text-[#33423a]">
-              {Math.round(
-                confidence * 100
-              )}
-              %
-            </span>
+            <div>
+              <p className="text-xs font-semibold text-[#8A681F]">
+                Pharmacist verification recommended
+              </p>
+
+              <p className="mt-0.5 text-xs leading-5 text-[#A47B2C]">
+                Verify the extracted medication details against the original
+                prescription before dispensing or clinical use.
+              </p>
+            </div>
           </div>
         )}
       </div>
@@ -1764,12 +1843,14 @@ function MedicineCard({
 function MedDetail({
   label,
   value,
+  emphasized = false,
 }: {
   label: string;
   value:
     | string
     | null
     | undefined;
+  emphasized?: boolean;
 }) {
   return (
     <div className="bg-white px-3.5 py-3.5">
@@ -1777,7 +1858,13 @@ function MedDetail({
         {label}
       </p>
 
-      <p className="mt-1 text-[11px] font-semibold text-[#35423b]">
+      <p
+        className={
+          emphasized
+            ? "mt-1 text-[11px] font-semibold text-[#17211d]"
+            : "mt-1 text-[11px] font-semibold text-[#35423b]"
+        }
+      >
         {value ?? "—"}
       </p>
     </div>
@@ -1873,141 +1960,187 @@ function OcrFlagCard({
 // Safety flag card
 // =========================================================
 
-function SafetyFlagCard({
-  flag,
-}: {
-  flag: SafetyFlag;
-}) {
-  const style =
-    severityStyle(flag.severity);
+function SafetyFlagCard({ flag }: { flag: SafetyFlag }) {
+  const severity = severityStyle(flag.severity);
+
+  const isHigh =
+    flag.severity.toLowerCase() === "high" ||
+    flag.severity.toLowerCase() === "error";
 
   const isInteraction =
-    flag.type ===
-      "drug_interaction" ||
-    Boolean(flag.interaction_id);
-
-  const matchedDrugs =
-    flag.matched_drugs?.filter(
-      Boolean
-    ) ?? [];
+    flag.type === "drug_interaction" || !!flag.interaction_id;
 
   return (
     <article
-      className={`relative overflow-hidden rounded-2xl border ${style.border} ${style.background} shadow-[0_4px_20px_rgba(40,35,30,0.025)]`}
+      className={`rounded-2xl border bg-white p-5 shadow-sm ${
+        isHigh
+          ? "border-red-200"
+          : flag.severity.toLowerCase() === "warning"
+            ? "border-amber-200"
+            : "border-slate-200"
+      }`}
     >
-
-      <div
-        className={`absolute inset-y-0 left-0 w-1 ${style.accent}`}
-      />
-
-      <div className="p-5 pl-6">
-
-        <div className="flex items-start gap-3">
-
-          <div
-            className={`grid h-9 w-9 shrink-0 place-items-center rounded-xl ${style.iconBackground} ${style.text} text-xs font-bold`}
-          >
-            {isInteraction
-              ? "↔"
-              : flag.severity ===
-                "warning"
+      {/* Header */}
+      <div className="flex items-start gap-3">
+        <div
+          className={`flex h-10 w-10 shrink-0 items-center justify-center rounded-xl text-sm font-bold ${severity.iconBackground}`}
+        >
+          {isHigh
+            ? "!"
+            : flag.severity.toLowerCase() === "warning"
               ? "!"
               : "i"}
-          </div>
+        </div>
 
-          <div className="min-w-0 flex-1">
+        <div className="min-w-0 flex-1">
+          <div className="flex flex-wrap items-center gap-2">
+            <span
+              className={`rounded-full px-2.5 py-1 text-[11px] font-semibold uppercase tracking-wide ${severity.badge}`}
+            >
+              {flag.severity}
+            </span>
 
-            <div className="flex flex-wrap items-center gap-2">
-
-              <span
-                className={`text-[10px] font-bold uppercase tracking-[0.08em] ${style.text}`}
-              >
-                {style.label}
+            {isInteraction && (
+              <span className="rounded-full bg-slate-100 px-2.5 py-1 text-[11px] font-medium text-slate-600">
+                Drug interaction
               </span>
-
-              {isInteraction && (
-                <span className="rounded-full border border-current/10 bg-white/60 px-2 py-0.5 text-[9px] font-semibold uppercase tracking-wide">
-                  Drug interaction
-                </span>
-              )}
-
-              {flag.medicine && (
-                <span className="ml-auto font-mono text-[9px] opacity-60">
-                  {flag.medicine}
-                </span>
-              )}
-            </div>
-
-            {isInteraction &&
-              matchedDrugs.length >
-                0 && (
-                <div className="mt-4">
-
-                  <p className="text-[9px] font-semibold uppercase tracking-[0.1em] opacity-60">
-                    Matched medicines
-                  </p>
-
-                  <div className="mt-1.5 rounded-xl border border-current/10 bg-white/65 px-3.5 py-3 font-mono text-[10px] font-medium">
-                    {matchedDrugs.join(
-                      " + "
-                    )}
-                  </div>
-                </div>
-              )}
-
-            <p className="mt-4 text-xs leading-6">
-              {flag.message}
-            </p>
-
-            {isInteraction &&
-              flag.interaction_category && (
-                <div className="mt-4 flex flex-wrap items-center gap-2 text-[10px]">
-                  <span className="font-semibold opacity-70">
-                    Risk category
-                  </span>
-
-                  <span className="rounded-md bg-white/60 px-2 py-1 font-medium">
-                    {formatInteractionCategory(
-                      flag.interaction_category
-                    )}
-                  </span>
-                </div>
-              )}
-
-            {isInteraction &&
-              flag.review_action && (
-                <div className="mt-4 rounded-xl border border-current/10 bg-white/50 p-4">
-                  <p className="text-[9px] font-semibold uppercase tracking-[0.1em] opacity-65">
-                    Recommended action
-                  </p>
-
-                  <p className="mt-1.5 text-[10px] leading-5">
-                    {flag.review_action}
-                  </p>
-                </div>
-              )}
-
-            {isInteraction &&
-              flag.evidence_source && (
-                <p className="mt-4 text-[9px] opacity-60">
-                  Evidence:{" "}
-                  {flag.evidence_source}
-                </p>
-              )}
-
-            {flag.interaction_id && (
-              <p className="mt-2 font-mono text-[8px] opacity-40">
-                Reference:{" "}
-                {flag.interaction_id}
-              </p>
             )}
           </div>
+
+          <h3 className="mt-3 text-[15px] font-semibold leading-6 text-slate-950">
+            {flag.message}
+          </h3>
+
+          {flag.medicine && (
+            <p className="mt-1.5 text-xs text-slate-500">
+              Medicine:{" "}
+              <span className="font-medium text-slate-700">
+                {flag.medicine}
+              </span>
+            </p>
+          )}
         </div>
       </div>
+
+      {/* Interaction details */}
+      {isInteraction && flag.matched_drugs?.length ? (
+        <div className="mt-5 rounded-xl border border-red-100 bg-red-50/40 p-4">
+          <div className="flex items-center gap-2">
+            <span className="h-1.5 w-1.5 rounded-full bg-red-500" />
+
+            <p className="text-[10px] font-semibold uppercase tracking-[0.12em] text-red-700">
+              Matched medicines
+            </p>
+          </div>
+
+          <div className="mt-3 flex flex-wrap items-center gap-2">
+            {flag.matched_drugs.map((drug, index) => (
+              <div
+                key={`${drug}-${index}`}
+                className="flex items-center gap-2"
+              >
+                <span className="rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs font-semibold text-slate-800 shadow-sm">
+                  {drug}
+                </span>
+
+                {index < (flag.matched_drugs?.length ?? 0) - 1 && (
+                  <span className="text-xs font-bold text-red-400">
+                    +
+                  </span>
+                )}
+              </div>
+            ))}
+          </div>
+        </div>
+      ) : null}
+
+      {/* Clinical metadata */}
+      {(flag.interaction_category || flag.evidence_source) && (
+        <div className="mt-5 grid gap-3 sm:grid-cols-2">
+          {flag.interaction_category && (
+            <div className="rounded-xl border border-slate-100 bg-slate-50 p-4">
+              <p className="text-[10px] font-semibold uppercase tracking-[0.12em] text-slate-400">
+                Risk category
+              </p>
+
+              <p className="mt-2 text-sm font-semibold text-slate-800">
+                {formatInteractionCategory(flag.interaction_category)}
+              </p>
+            </div>
+          )}
+
+          {flag.evidence_source && (
+            <div className="rounded-xl border border-slate-100 bg-slate-50 p-4">
+              <p className="text-[10px] font-semibold uppercase tracking-[0.12em] text-slate-400">
+                Evidence
+              </p>
+
+              <p className="mt-2 text-sm font-semibold text-slate-800">
+                {flag.evidence_source}
+              </p>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Recommended action */}
+      {flag.review_action && (
+        <div
+          className={`mt-5 rounded-xl border px-4 py-4 ${
+            isHigh
+              ? "border-red-200 bg-red-50"
+              : "border-amber-200 bg-amber-50"
+          }`}
+        >
+          <div className="flex items-start gap-3">
+            <div
+              className={`mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-full ${
+                isHigh
+                  ? "bg-red-100 text-red-700"
+                  : "bg-amber-100 text-amber-700"
+              }`}
+            >
+              <span className="text-xs font-bold">!</span>
+            </div>
+
+            <div className="min-w-0">
+              <p
+                className={`text-[10px] font-semibold uppercase tracking-[0.12em] ${
+                  isHigh ? "text-red-700" : "text-amber-700"
+                }`}
+              >
+                Recommended action
+              </p>
+
+              <p className="mt-1.5 text-sm font-semibold leading-6 text-slate-800">
+                {flag.review_action}
+              </p>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Reference */}
+      {flag.interaction_id && (
+        <div className="mt-5 flex flex-col gap-2 border-t border-slate-100 pt-4 sm:flex-row sm:items-center sm:justify-between">
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="text-[10px] font-semibold uppercase tracking-[0.12em] text-slate-400">
+              Reference
+            </span>
+
+            <code className="rounded-md bg-slate-50 px-2 py-1 text-[10px] font-medium text-slate-500">
+              {flag.interaction_id}
+            </code>
+          </div>
+
+          <span className="text-[11px] font-medium text-slate-400">
+            Clinical review required
+          </span>
+        </div>
+      )}
     </article>
   );
 }
-
 // =========================================================
 // Empty state
 // =========================================================
