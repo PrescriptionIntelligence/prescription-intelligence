@@ -363,6 +363,57 @@ def _resolve_duration(
     )
 
 
+def _resolve_strength(
+    medicine_result: dict,
+    top_hypothesis: dict,
+) -> tuple[object, str | None]:
+    """
+    Resolve medicine strength using prescription evidence first.
+
+    Priority:
+        1. explicit structured prescription strength
+        2. resolved medicine hypothesis strength
+
+    The prescription value must not be silently replaced by
+    knowledge-base or resolver defaults.
+
+    Example:
+        Prescription: Paracetamol 650 mg
+        Knowledge base: Paracetamol 500 mg
+
+        Result:
+            650 mg
+    """
+
+    explicit_strength_value = medicine_result.get(
+        "strength_value"
+    )
+
+    explicit_strength_unit = medicine_result.get(
+        "strength_unit"
+    )
+
+    resolved_strength_value = top_hypothesis.get(
+        "strength_value"
+    )
+
+    resolved_strength_unit = top_hypothesis.get(
+        "strength_unit"
+    )
+
+    if explicit_strength_value is not None:
+        return (
+            explicit_strength_value,
+            explicit_strength_unit
+            or resolved_strength_unit,
+        )
+
+    return (
+        resolved_strength_value,
+        resolved_strength_unit,
+    )
+
+
 # ---------------------------------------------------------
 # Build one medicine plan
 # ---------------------------------------------------------
@@ -400,6 +451,15 @@ def build_medicine_plan(
         dict,
     ):
         top_hypothesis = {}
+
+    # -----------------------------------------------------
+    # Resolve explicit prescription strength
+    # -----------------------------------------------------
+
+    strength_value, strength_unit = _resolve_strength(
+        medicine_result,
+        top_hypothesis,
+    )
 
     # -----------------------------------------------------
     # Extract instruction text
@@ -626,13 +686,9 @@ def build_medicine_plan(
                 "generic_name"
             ),
 
-            "strength_value": top_hypothesis.get(
-                "strength_value"
-            ),
+            "strength_value": strength_value,
 
-            "strength_unit": top_hypothesis.get(
-                "strength_unit"
-            ),
+            "strength_unit": strength_unit,
 
             "dosage_form": dosage_form,
 

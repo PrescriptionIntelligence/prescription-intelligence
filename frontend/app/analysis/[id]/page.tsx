@@ -133,6 +133,52 @@ export default function AnalysisDetailPage() {
   const [activeTab, setActiveTab] = useState<
     "medicines" | "ocr" | "safety"
   >("medicines");
+  const [downloadingReport, setDownloadingReport] = useState(false);
+  const [reportError, setReportError] = useState("");
+
+  const handleDownloadReport = async () => {
+  setDownloadingReport(true);
+  setReportError("");
+
+  try {
+    const response = await fetch(
+      `${API_URL}/prescriptions/${encodeURIComponent(prescriptionId)}/report`
+    );
+
+    if (!response.ok) {
+      throw new Error("Unable to generate the prescription report.");
+    }
+
+    const blob = await response.blob();
+    const contentDisposition = response.headers.get("content-disposition");
+
+    let fileName = `${prescriptionId}-prescription-intelligence-report.pdf`;
+
+    const fileNameMatch = contentDisposition?.match(
+      /filename="?([^"]+)"?/i
+    );
+
+    if (fileNameMatch?.[1]) {
+      fileName = fileNameMatch[1];
+    }
+
+    const url = window.URL.createObjectURL(blob);
+    const link = document.createElement("a");
+
+    link.href = url;
+    link.download = fileName;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+
+    window.URL.revokeObjectURL(url);
+  } catch (downloadError) {
+    console.error(downloadError);
+    setReportError("Could not download the prescription report. Please try again.");
+  } finally {
+    setDownloadingReport(false);
+  }
+};
 
   useEffect(() => {
     if (!prescriptionId) return;
@@ -279,18 +325,45 @@ export default function AnalysisDetailPage() {
               {formatDate(prescription.created_at)}
             </p>
           </div>
-          <div className="flex gap-3">
+
+          <div className="flex flex-wrap items-center gap-3">
             {highPriorityFlags.length > 0 && (
               <span className="inline-flex items-center gap-1.5 rounded-full bg-[#fdf0f0] px-3 py-1.5 text-xs font-medium text-[#7a2020]">
                 ● {highPriorityFlags.length} High Priority
               </span>
             )}
+
             {reviewRequired.length > 0 && (
               <span className="inline-flex items-center gap-1.5 rounded-full bg-[#fdf8e8] px-3 py-1.5 text-xs font-medium text-[#6a5010]">
                 ⚑ {reviewRequired.length} Review Required
               </span>
             )}
+
+            <button
+              type="button"
+              onClick={handleDownloadReport}
+              disabled={downloadingReport}
+              className="inline-flex items-center gap-2 rounded-xl bg-[#17211d] px-4 py-2.5 text-xs font-medium text-white transition hover:bg-[#2a3831] disabled:cursor-not-allowed disabled:opacity-60"
+            >
+              {downloadingReport ? (
+                <>
+                  <span className="h-3 w-3 animate-spin rounded-full border-2 border-white/30 border-t-white" />
+                  Generating…
+                </>
+              ) : (
+                <>
+                  <span>↓</span>
+                  Download Report
+                </>
+              )}
+            </button>
           </div>
+
+          {reportError && (
+            <p className="w-full text-right text-xs text-[#8b4040]">
+              {reportError}
+            </p>
+          )}
         </div>
 
         <div className="grid gap-8 lg:grid-cols-12">
@@ -376,7 +449,7 @@ export default function AnalysisDetailPage() {
                 ) : (
                   prescription.medicines.map((medicine, index) => (
                     <MedicineCard
-                      key={`${medicine.id ?? medicine.medicine_name ?? "medicine"}-${index}`}
+                      key={`${medicine.id ?? "medicine"}-${index}`}
                       medicine={medicine}
                     />
                   ))

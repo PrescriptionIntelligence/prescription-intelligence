@@ -226,25 +226,199 @@ def _format_issue(
 # Medicine report
 # ---------------------------------------------------------
 
-
 def _build_medicine_report(
     medicine_result: dict,
+    plan_result: dict | None = None,
 ) -> dict:
     """
     Build a clean report for one medicine.
+
+    Safety information comes from medicine_result.
+    Structured medication information comes from plan_result
+    when available.
     """
 
+    if not isinstance(medicine_result, dict):
+        medicine_result = {}
+
+    if not isinstance(plan_result, dict):
+        plan_result = {}
+
+    plan_medicine = plan_result.get(
+        "medicine",
+        {},
+    )
+
+    if not isinstance(plan_medicine, dict):
+        plan_medicine = {}
+
+    plan_instructions = plan_result.get(
+        "instructions",
+        {},
+    )
+
+    if not isinstance(plan_instructions, dict):
+        plan_instructions = {}
+
+    # -----------------------------------------------------
+    # Medicine identity
+    # -----------------------------------------------------
+
     medicine_name = _clean_text(
-        medicine_result.get("medicine"),
+        plan_medicine.get("normalized_name")
+        or medicine_result.get("medicine")
+        or plan_medicine.get("generic_name"),
         "Unknown medicine",
     )
+
+    # -----------------------------------------------------
+    # Strength
+    # -----------------------------------------------------
+
+    strength_value = plan_medicine.get(
+        "strength_value"
+    )
+
+    strength_unit = _clean_text(
+        plan_medicine.get(
+            "strength_unit"
+        )
+    )
+
+    if (
+        strength_value is not None
+        and strength_unit
+    ):
+        strength = (
+            f"{strength_value} {strength_unit}"
+        )
+    else:
+        strength = medicine_result.get(
+            "strength"
+        )
+
+    # -----------------------------------------------------
+    # Dose
+    # -----------------------------------------------------
+
+    quantity = plan_instructions.get(
+        "quantity"
+    )
+
+    dosage_form = _clean_text(
+        plan_medicine.get(
+            "dosage_form"
+        )
+    )
+
+    if quantity is not None:
+
+        quantity_text = _clean_text(
+            quantity
+        )
+
+        if dosage_form:
+            dose = (
+                f"{quantity_text} "
+                f"{dosage_form.lower()}"
+            )
+        else:
+            dose = quantity_text
+
+    else:
+
+        dose = medicine_result.get(
+            "dose"
+        )
+
+    # -----------------------------------------------------
+    # Route
+    # -----------------------------------------------------
+
+    route = (
+        plan_instructions.get("route")
+        or medicine_result.get("route")
+    )
+
+    # -----------------------------------------------------
+    # Frequency
+    # -----------------------------------------------------
+
+    frequency = (
+        plan_instructions.get(
+            "frequency"
+        )
+        or medicine_result.get(
+            "frequency"
+        )
+    )
+
+    frequency_labels = {
+        "once_daily": "Once daily",
+        "twice_daily": "Twice daily",
+        "three_times_daily": "Three times daily",
+        "four_times_daily": "Four times daily",
+    }
+
+    if frequency in frequency_labels:
+        frequency = frequency_labels[
+            frequency
+        ]
+
+    # -----------------------------------------------------
+    # Duration
+    # -----------------------------------------------------
+
+    duration_data = plan_instructions.get(
+        "duration"
+    )
+
+    if isinstance(
+        duration_data,
+        dict,
+    ):
+
+        duration = duration_data.get(
+            "text"
+        )
+
+        if not duration:
+
+            value = duration_data.get(
+                "value"
+            )
+
+            unit = duration_data.get(
+                "unit"
+            )
+
+            if value is not None and unit:
+                duration = (
+                    f"{value} {unit}"
+                )
+
+    else:
+
+        duration = duration_data
+
+    if not duration:
+        duration = medicine_result.get(
+            "duration"
+        )
+
+    # -----------------------------------------------------
+    # Safety issues
+    # -----------------------------------------------------
 
     issues = medicine_result.get(
         "issues",
         [],
     )
 
-    if not isinstance(issues, list):
+    if not isinstance(
+        issues,
+        list,
+    ):
         issues = []
 
     formatted_issues = [
@@ -279,51 +453,77 @@ def _build_medicine_report(
         if issue["severity"] == "low"
     )
 
-    return {
-        "medicine": medicine_name,
-        "generic_name": medicine_result.get(
-            "generic_name"
-        ),
-        "brand_name": medicine_result.get(
-            "brand_name"
-        ),
-        "strength": medicine_result.get(
-            "strength"
-        ),
-        "dose": medicine_result.get(
-            "dose"
-        ),
-        "route": medicine_result.get(
-            "route"
-        ),
-        "frequency": medicine_result.get(
-            "frequency"
-        ),
-        "duration": medicine_result.get(
-            "duration"
-        ),
-        "needs_review": bool(
+    # -----------------------------------------------------
+    # Review / confidence
+    # -----------------------------------------------------
+
+    needs_review = bool(
+        plan_result.get(
+            "needs_review",
             medicine_result.get(
                 "needs_review",
                 False,
-            )
-        ),
-        "confidence": _safe_float(
+            ),
+        )
+    )
+
+    confidence = _safe_float(
+        plan_result.get(
+            "confidence"
+        )
+    )
+
+    if confidence is None:
+        confidence = _safe_float(
             medicine_result.get(
                 "confidence"
             )
+        )
+
+    return {
+        "medicine": medicine_name,
+
+        "generic_name": (
+            plan_medicine.get(
+                "generic_name"
+            )
+            or medicine_result.get(
+                "generic_name"
+            )
         ),
+
+        "brand_name": medicine_result.get(
+            "brand_name"
+        ),
+
+        "strength": strength,
+
+        "dose": dose,
+
+        "route": route,
+
+        "frequency": frequency,
+
+        "duration": duration,
+
+        "dosage_form": dosage_form,
+
+        "needs_review": needs_review,
+
+        "confidence": confidence,
+
         "issue_count": len(
             formatted_issues
         ),
+
         "severity": {
             "high": high_count,
             "medium": medium_count,
             "low": low_count,
         },
+
         "issues": formatted_issues,
     }
-
 
 # ---------------------------------------------------------
 # Summary generation
@@ -537,13 +737,46 @@ def build_prescription_report(
     ):
         medicines = []
 
-    medicine_reports = [
-        _build_medicine_report(
-            medicine
+    plan_medicines = prescription_plan.get(
+        "medicines",
+        [],
+    )
+
+    if not isinstance(
+        plan_medicines,
+        list,
+    ):
+        plan_medicines = []
+
+    medicine_reports = []
+
+    for index, medicine in enumerate(
+        medicines
+    ):
+
+        if not isinstance(
+            medicine,
+            dict,
+        ):
+            continue
+
+        plan_result = None
+
+        if index < len(plan_medicines):
+            candidate = plan_medicines[index]
+
+            if isinstance(
+                candidate,
+                dict,
+            ):
+                plan_result = candidate
+
+        medicine_reports.append(
+            _build_medicine_report(
+                medicine,
+                plan_result,
+            )
         )
-        for medicine in medicines
-        if isinstance(medicine, dict)
-    ]
 
     summary = _build_summary(
         safety_analysis

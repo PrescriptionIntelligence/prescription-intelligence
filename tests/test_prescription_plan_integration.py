@@ -92,3 +92,17 @@ def test_explicit_tablet_instruction_is_preserved_in_plan():
     assert medicine_plan["instructions"]["frequency"] == "twice_daily"
     assert medicine_plan["instructions"]["duration"]["value"] == 5.0
     assert medicine_plan["instructions"]["route"] == "oral"
+
+def test_explicit_prescription_strength_overrides_resolved_strength():
+    result = process_prescription(
+        "Paracetamol 650 mg, 1 tablet three times daily for 3 days"
+    )
+
+    medicine = result["medicines"][0]
+    medicine_plan = result["prescription_plan"]["medicines"][0]
+
+    assert medicine["strength_value"] == 650.0
+    assert medicine["strength_unit"] == "mg"
+
+    assert medicine_plan["medicine"]["strength_value"] == 650.0
+    assert medicine_plan["medicine"]["strength_unit"] == "mg"
