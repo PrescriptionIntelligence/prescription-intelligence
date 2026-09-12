@@ -167,8 +167,8 @@ def _infer_dosage_form(
     knowledge-base information.
     """
 
-    explicit_unit = (
-        medicine_result.get("dose_unit")
+    explicit_unit = medicine_result.get(
+        "dose_unit"
     )
 
     if explicit_unit:
@@ -214,8 +214,6 @@ def _infer_dosage_form(
 
         return raw_unit
 
-    # Only use knowledge-base dosage form when the
-    # prescription did not explicitly provide one.
     return top_hypothesis.get(
         "dosage_form"
     )
@@ -376,13 +374,6 @@ def _resolve_strength(
 
     The prescription value must not be silently replaced by
     knowledge-base or resolver defaults.
-
-    Example:
-        Prescription: Paracetamol 650 mg
-        Knowledge base: Paracetamol 500 mg
-
-        Result:
-            650 mg
     """
 
     explicit_strength_value = medicine_result.get(
@@ -424,6 +415,11 @@ def build_medicine_plan(
     """
     Combine one interpreted medicine result with its
     medication instructions.
+
+    Resolution metadata is deliberately preserved inside
+    the medicine plan so downstream safety analysis can
+    distinguish medicine-identity uncertainty from
+    strength conflicts and other resolution conditions.
     """
 
     raw_text = medicine_result.get(
@@ -550,17 +546,6 @@ def build_medicine_plan(
 
     # -----------------------------------------------------
     # Determine whether instructions need review
-    #
-    # Missing optional information such as timing,
-    # food relationship, or route should not automatically
-    # make a complete instruction unsafe.
-    #
-    # Critical instruction signals are:
-    #   - quantity
-    #   - frequency
-    #   - duration when explicitly supplied
-    #
-    # Route is preserved when available.
     # -----------------------------------------------------
 
     has_quantity = (
@@ -585,9 +570,6 @@ def build_medicine_plan(
         or not has_frequency
     )
 
-    # If the original prescription explicitly contained
-    # duration information, it should also survive into
-    # the structured plan.
     raw_duration_present = bool(
         re.search(
             r"\b\d+\s*(day|days|week|weeks|month|months)\b",
@@ -608,11 +590,19 @@ def build_medicine_plan(
     # Confidence
     # -----------------------------------------------------
 
+    resolution_evidence = resolution.get(
+        "evidence",
+        {},
+    )
+
+    if not isinstance(
+        resolution_evidence,
+        dict,
+    ):
+        resolution_evidence = {}
+
     medicine_confidence = _safe_float(
-        resolution.get(
-            "evidence",
-            {},
-        ).get(
+        resolution_evidence.get(
             "top_score",
             0.0,
         )
@@ -625,9 +615,6 @@ def build_medicine_plan(
         )
     )
 
-    # Structured extraction can strengthen the instruction
-    # interpretation when the interpreter had lost a signal
-    # while processing the shortened instruction text.
     structured_signal_count = sum(
         value is not None
         for value in [
@@ -698,6 +685,22 @@ def build_medicine_plan(
                 "alternatives",
                 [],
             ),
+
+            # Preserve the complete resolver output for
+            # downstream clinical safety analysis.
+            "resolution": resolution,
+
+            "resolution_status": resolution.get(
+                "status"
+            ),
+
+            "resolution_reason": resolution.get(
+                "reason"
+            ),
+
+            "resolution_evidence": resolution_evidence,
+
+            "top_hypothesis": top_hypothesis,
         },
 
         "instructions": {

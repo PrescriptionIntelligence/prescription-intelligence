@@ -1,215 +1,126 @@
-"""
-Prescription Interpreter
-
-Combines medicine candidates and their resolved hypotheses
-into a prescription-level intelligence result.
-
-This layer does NOT diagnose, prescribe, or invent medicines.
-
-Its job is to:
-    - process all detected medicine candidates
-    - resolve each candidate safely
-    - summarize confidence
-    - identify medicines requiring pharmacist review
-    - preserve structured prescription instructions
-    - preserve alternative hypotheses
-"""
-
 from __future__ import annotations
 
-from backend.services.medicine_normalizer import (
-    get_ranked_medicine_hypotheses,
-)
+from typing import Any
 
-from backend.services.medicine_evidence import (
-    rank_hypotheses_by_evidence,
-)
-
-from backend.services.medicine_resolver import (
-    resolve_medicine_candidate,
-)
+from backend.services.medicine_normalizer import get_ranked_medicine_hypotheses
+from backend.services.medicine_evidence import rank_hypotheses_by_evidence
+from backend.services.medicine_resolver import resolve_medicine_candidate
 
 
-# ---------------------------------------------------------
-# Prescription status
-# ---------------------------------------------------------
-
-def _determine_prescription_status(
-    results: list[dict],
-) -> str:
-    """
-    Determine the overall medicine-resolution status
-    of a prescription.
-
-    Possible statuses:
-
-        accepted
-        partially_resolved
-        review_required
-        no_medicines_detected
-
-    Important:
-        "accepted" refers only to medicine identity
-        resolution.
-
-        It does NOT mean that the prescription is clinically
-        safe, appropriate, or free from drug interactions.
-    """
-
-    if not results:
+def _determine_prescription_status(medicines: list[dict[str, Any]]) -> str:
+    if not medicines:
         return "no_medicines_detected"
 
-    review_count = sum(
-        1
-        for result in results
-        if result["resolution"]["status"] == "needs_review"
-    )
-
-    accepted_count = sum(
-        1
-        for result in results
-        if result["resolution"]["status"] == "accepted"
-    )
-
-    unknown_count = sum(
-        1
-        for result in results
-        if result["resolution"]["status"] == "unknown"
-    )
-
-    # Every detected medicine requires review.
-    if review_count + unknown_count == len(results):
+    if any(medicine.get("needs_review") for medicine in medicines):
         return "review_required"
 
-    # At least one medicine is accepted, but one or more
-    # medicines still require review or could not be identified.
-    if review_count > 0 or unknown_count > 0:
-        return "partially_resolved"
+    return "accepted"
 
-    # Every detected medicine was confidently accepted.
-    if accepted_count == len(results):
-        return "accepted"
-
-    # Defensive fallback.
-    return "review_required"
-
-
-# ---------------------------------------------------------
-# Process one medicine candidate
-# ---------------------------------------------------------
 
 def interpret_medicine_candidate(
-    candidate: dict,
-) -> dict:
-    """
-    Process one detected medicine candidate.
+    candidate: dict[str, Any],
+) -> dict[str, Any]:
 
-    Pipeline:
-
-        candidate
-            ↓
-        medicine hypotheses
-            ↓
-        evidence fusion
-            ↓
-        safe resolution
-
-    Important:
-        Structured prescription fields extracted by the
-        parser are intentionally preserved here so that
-        downstream plan and safety layers do not lose them.
-    """
-
-    hypotheses = get_ranked_medicine_hypotheses(
+    ranked_hypotheses = get_ranked_medicine_hypotheses(
         candidate
     )
 
-    evidence_ranked = rank_hypotheses_by_evidence(
+    ranked_hypotheses = rank_hypotheses_by_evidence(
         candidate,
-        hypotheses,
+        ranked_hypotheses,
     )
 
     resolution = resolve_medicine_candidate(
         candidate,
-        evidence_ranked,
+        ranked_hypotheses,
     )
 
-    return {
-        # -------------------------------------------------
-        # Original text
-        # -------------------------------------------------
+    top_hypothesis = resolution.get("top_hypothesis") or {}
 
-        "raw_text": candidate.get(
-            "text",
-            "",
+    resolution_status = resolution.get("status")
+
+    # A medicine can only be considered fully accepted when
+    # identity AND clinically relevant strength evidence agree.
+    resolution_requires_review = resolution_status != "accepted"
+
+    resolved_name = top_hypothesis.get("normalized_name")
+    resolved_generic = top_hypothesis.get("generic_name")
+
+    original_name = candidate.get("name")
+
+    # Preserve the prescription's explicitly extracted strength.
+    # Never silently replace it with the vocabulary hypothesis strength.
+    strength_value = candidate.get("strength_value")
+    strength_unit = candidate.get("strength_unit")
+
+    extraction_confidence = candidate.get(
+        "extraction_confidence"
+    )
+
+    normalization_confidence = candidate.get(
+        "normalization_confidence"
+    )
+
+    if normalization_confidence is None:
+        normalization_confidence = candidate.get(
+            "confidence"
+        )
+
+    candidate_confidence = candidate.get("confidence")
+
+    if candidate_confidence is None:
+        candidate_confidence = candidate.get(
+            "extraction_confidence"
+        )
+
+    if resolution_requires_review:
+        confidence = min(
+            float(candidate_confidence)
+            if candidate_confidence is not None
+            else 0.0,
+            float(resolution.get("evidence", {}).get("top_score") or 0.0),
+        )
+    else:
+        confidence = (
+            float(candidate_confidence)
+            if candidate_confidence is not None
+            else 0.0
+        )
+
+    result = {
+        "raw_text": candidate.get("raw_text"),
+        "medicine_text": resolved_name or original_name,
+
+        "ocr_confidence": candidate.get(
+            "ocr_confidence",
+            extraction_confidence,
         ),
 
-        "medicine_text": candidate.get(
-            "medicine_text",
-            "",
+        "candidate_score": candidate.get(
+            "candidate_score",
+            candidate.get("normalization_confidence"),
         ),
 
-        # -------------------------------------------------
-        # Confidence
-        # -------------------------------------------------
-
-        "ocr_confidence": round(
-            float(
-                candidate.get(
-                    "ocr_confidence",
-                    0.0,
-                )
-            ),
-            3,
-        ),
-
-        "candidate_score": round(
-            float(
-                candidate.get(
-                    "candidate_score",
-                    0.0,
-                )
-            ),
-            3,
-        ),
-
-        # -------------------------------------------------
-        # Preserve structured medicine information
-        # -------------------------------------------------
-
-        "name": candidate.get(
-            "name"
-        ),
-
-        "generic_name": candidate.get(
-            "generic_name"
-        ),
+        "name": resolved_name or original_name,
+        "generic_name": resolved_generic
+        or candidate.get("generic_name")
+        or original_name,
 
         "brand_name": candidate.get(
             "brand_name"
         ),
 
-        "strength_value": candidate.get(
-            "strength_value"
-        ),
-
-        "strength_unit": candidate.get(
-            "strength_unit"
-        ),
+        "strength_value": strength_value,
+        "strength_unit": strength_unit,
 
         "strength_components": candidate.get(
             "strength_components",
             [],
         ),
 
-        # -------------------------------------------------
-        # Prescription instruction fields
-        # -------------------------------------------------
-
         "dose_value": candidate.get(
             "dose_value"
         ),
-
         "dose_unit": candidate.get(
             "dose_unit"
         ),
@@ -221,7 +132,6 @@ def interpret_medicine_candidate(
         "frequency_value": candidate.get(
             "frequency_value"
         ),
-
         "frequency_unit": candidate.get(
             "frequency_unit"
         ),
@@ -229,7 +139,6 @@ def interpret_medicine_candidate(
         "duration_value": candidate.get(
             "duration_value"
         ),
-
         "duration_unit": candidate.get(
             "duration_unit"
         ),
@@ -238,14 +147,9 @@ def interpret_medicine_candidate(
             "instructions"
         ),
 
-        # -------------------------------------------------
-        # Calculated information
-        # -------------------------------------------------
-
         "daily_dose_value": candidate.get(
             "daily_dose_value"
         ),
-
         "daily_dose_unit": candidate.get(
             "daily_dose_unit"
         ),
@@ -255,112 +159,75 @@ def interpret_medicine_candidate(
             [],
         ),
 
-        "extraction_confidence": candidate.get(
-            "extraction_confidence"
+        "extraction_confidence": extraction_confidence,
+        "normalization_confidence": normalization_confidence,
+
+        "confidence": round(
+            max(0.0, min(1.0, confidence)),
+            3,
         ),
 
-        "normalization_confidence": candidate.get(
-            "normalization_confidence"
+        "needs_review": (
+            bool(candidate.get("needs_review"))
+            or resolution_requires_review
         ),
 
-        "confidence": candidate.get(
-            "confidence"
+        "raw_strength_verified": (
+            resolution.get("evidence", {}).get(
+                "strength_compatible"
+            )
+            is True
         ),
 
-        "needs_review": candidate.get(
-            "needs_review"
+        "strength_verification": (
+            resolution.get("evidence", {}).get(
+                "strength_reason"
+            )
         ),
 
-        # -------------------------------------------------
-        # Resolution
-        # -------------------------------------------------
+        "matched_term": candidate.get(
+            "matched_term"
+        ),
+
+        "evidence": candidate.get(
+            "evidence"
+        ),
 
         "resolution": resolution,
     }
 
+    return result
 
-# ---------------------------------------------------------
-# Interpret complete prescription
-# ---------------------------------------------------------
 
 def interpret_prescription(
-    candidates: list[dict],
-) -> dict:
-    """
-    Convert detected medicine candidates into a
-    prescription-level intelligence result.
+    candidates: list[dict[str, Any]],
+) -> dict[str, Any]:
 
-    This is the main entry point for the interpreter.
-
-    The interpreter focuses on medicine identity resolution
-    while preserving structured prescription information.
-
-    Clinical safety checks such as drug interactions,
-    dose limits, and other safety rules are handled by
-    separate safety-analysis layers.
-    """
-
-    medicine_results: list[dict] = []
-
-    for candidate in candidates:
-
-        result = interpret_medicine_candidate(
-            candidate
-        )
-
-        medicine_results.append(
-            result
-        )
-
-    # -----------------------------------------------------
-    # Count resolution outcomes
-    # -----------------------------------------------------
+    medicines = [
+        interpret_medicine_candidate(candidate)
+        for candidate in candidates
+    ]
 
     accepted_count = sum(
         1
-        for result in medicine_results
-        if result["resolution"]["status"]
-        == "accepted"
+        for medicine in medicines
+        if not medicine.get("needs_review")
     )
 
-    review_count = sum(
+    review_required_count = sum(
         1
-        for result in medicine_results
-        if result["resolution"]["status"]
-        == "needs_review"
+        for medicine in medicines
+        if medicine.get("needs_review")
     )
-
-    unknown_count = sum(
-        1
-        for result in medicine_results
-        if result["resolution"]["status"]
-        == "unknown"
-    )
-
-    # -----------------------------------------------------
-    # Determine prescription-level status
-    # -----------------------------------------------------
 
     status = _determine_prescription_status(
-        medicine_results
+        medicines
     )
-
-    # -----------------------------------------------------
-    # Return structured intelligence result
-    # -----------------------------------------------------
 
     return {
         "status": status,
-
-        "medicine_count": len(
-            medicine_results
-        ),
-
+        "medicine_count": len(medicines),
         "accepted_count": accepted_count,
-
-        "review_required_count": (
-            review_count + unknown_count
-        ),
-
-        "medicines": medicine_results,
+        "review_required_count": review_required_count,
+        "medicines": medicines,
     }

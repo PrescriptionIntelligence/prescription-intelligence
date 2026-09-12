@@ -1,4 +1,7 @@
+from __future__ import annotations
+
 import re
+from typing import Any
 
 from backend.services.prescription_parser import extract_medicines
 from backend.services.dose_calculator import calculate_daily_doses
@@ -349,6 +352,52 @@ def _build_interpreter_candidates(
         candidates.append(candidate)
 
     return candidates
+
+
+def _merge_interpreted_medicines(
+    original_medicines: list[dict[str, Any]],
+    interpreted_medicines: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """
+    Merge interpreter output back into the canonical medicine
+    records used by the remainder of the pipeline.
+
+    The parser/dose-calculator fields remain available, while
+    identity resolution, strength verification, confidence and
+    review state from the interpreter become authoritative.
+
+    This is important because the interpreter performs the
+    strength-aware medicine resolution step.
+    """
+
+    merged = []
+
+    for index, original in enumerate(
+        original_medicines
+    ):
+        if index < len(interpreted_medicines):
+            interpreted = interpreted_medicines[index]
+
+            combined = dict(original)
+            combined.update(interpreted)
+
+            merged.append(combined)
+
+        else:
+            merged.append(dict(original))
+
+    # Defensive handling if an interpreter ever returns an
+    # additional medicine record.
+    if len(interpreted_medicines) > len(
+        original_medicines
+    ):
+        merged.extend(
+            interpreted_medicines[
+                len(original_medicines):
+            :]
+        )
+
+    return merged
 
 
 def _merge_safety_flags(
@@ -815,6 +864,8 @@ def process_prescription(
             ↓
         Medicine interpretation
             ↓
+        Interpreter → canonical medicine merge
+            ↓
         Prescription plan
             ↓
         Prescription safety analysis
@@ -878,6 +929,27 @@ def process_prescription(
 
     interpretation = interpret_prescription(
         interpreter_candidates
+    )
+
+    # ---------------------------------------------------------
+    # The interpreter is the authoritative source for:
+    #   - resolved medicine identity
+    #   - normalization confidence
+    #   - strength compatibility
+    #   - strength verification
+    #   - medicine-level needs_review
+    #
+    # Preserve parser/dose-calculator fields while merging
+    # these enriched interpretation fields into the canonical
+    # medicine records used by the rest of the pipeline.
+    # ---------------------------------------------------------
+
+    medicines = _merge_interpreted_medicines(
+        medicines,
+        interpretation.get(
+            "medicines",
+            [],
+        ),
     )
 
     # =========================================================

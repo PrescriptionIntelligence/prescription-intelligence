@@ -464,6 +464,10 @@ def check_ambiguous_medicines(
       - needs_review is True
       - status is UNKNOWN / REVIEW REQUIRED
       - normalization confidence is below 0.70
+
+    An explicit strength conflict is handled separately by the
+    clinical safety layer and should not also be reported as a
+    generic medicine-identification ambiguity.
     """
 
     flags = []
@@ -496,11 +500,53 @@ def check_ambiguous_medicines(
             or ""
         ).upper()
 
+        resolution = medicine.get("resolution")
+
+        if not isinstance(resolution, dict):
+            resolution = {}
+
+        resolution_reason = (
+            medicine.get("resolution_reason")
+            or resolution.get("reason")
+            or ""
+        )
+
+        resolution_status = (
+            medicine.get("resolution_status")
+            or resolution.get("status")
+            or ""
+        )
+
+        # -----------------------------------------------------
+        # Explicit strength conflicts are handled by the
+        # clinical safety layer as a high-severity finding.
+        # Do not also downgrade the same medicine to a generic
+        # medium-severity identity ambiguity.
+        # -----------------------------------------------------
+
+        strength_conflict = (
+            resolution_reason == "strength_conflict"
+            or str(resolution_reason).startswith(
+                "strength_conflict:"
+            )
+            or medicine.get("strength_verification") == "strength_conflict"
+            or str(
+                medicine.get("strength_verification") or ""
+            ).startswith("strength_conflict:")
+        )
+
+        if strength_conflict:
+            continue
+
         if (
             needs_review
             or status in (
                 "UNKNOWN",
                 "REVIEW REQUIRED",
+            )
+            or resolution_status in (
+                "needs_review",
+                "review_required",
             )
         ):
 
@@ -529,21 +575,14 @@ def check_ambiguous_medicines(
                     "severity": "medium",
                     "medicine": name,
                     "message": (
-                        f"{name} was identified with low confidence "
-                        f"({normalization_confidence:.0%}). "
-                        "Please verify the medicine name before "
+                        f"{name} has low identification confidence. "
+                        "Manual verification is recommended before "
                         "dispensing."
                     ),
                 }
             )
 
     return flags
-
-
-# ---------------------------------------------------------
-# Daily-dose limit check
-# ---------------------------------------------------------
-
 
 def check_daily_dose_limits(
     medicines: list[dict],

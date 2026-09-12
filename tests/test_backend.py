@@ -1145,3 +1145,102 @@ class TestTokenEndpoint:
         assert me_form.status_code == 200
         assert me_json.status_code == 200
         assert me_form.json()["email"] == me_json.json()["email"]
+
+# =========================================================
+
+# =========================================================
+# Strength-aware medicine resolution regression tests
+# =========================================================
+
+def test_exact_strength_is_accepted():
+    result = process_prescription(
+        "Warfarin 5 mg\nTake 1 tablet once daily."
+    )
+
+    assert result["medicines"]
+
+    medicine = result["medicines"][0]
+
+    assert medicine["name"] == "Warfarin"
+    assert medicine["strength_value"] == 5.0
+    assert medicine["strength_unit"] == "mg"
+    assert medicine["needs_review"] is False
+    assert medicine["raw_strength_verified"] is True
+    assert medicine["strength_verification"] == "strength_match"
+
+
+def test_conflicting_strength_requires_review():
+    result = process_prescription(
+        "Warfarin 10 mg\nTake 1 tablet once daily."
+    )
+
+    assert result["medicines"]
+
+    medicine = result["medicines"][0]
+
+    assert medicine["name"] == "Warfarin"
+    assert medicine["strength_value"] == 10.0
+    assert medicine["strength_unit"] == "mg"
+    assert medicine["needs_review"] is True
+    assert medicine["raw_strength_verified"] is False
+    assert (
+        medicine["strength_verification"]
+        == "strength_conflict:10mg_vs_5mg"
+    )
+    assert result["analysis_metadata"]["needs_review"] is True
+
+
+def test_ocr_like_unreliable_medicine_does_not_silently_resolve():
+    result = process_prescription(
+        "Warfln 5 mg\nTake 1 tablet once daily."
+    )
+
+    assert result["analysis_metadata"]["needs_review"] is True
+
+    # Current candidate detector intentionally does not force
+    # an unreliable OCR typo into a medicine identity.
+    if result["medicines"]:
+        medicine = result["medicines"][0]
+        assert medicine["needs_review"] is True
+    else:
+        assert any(
+            flag["type"] == "ocr_extraction_failed"
+            for flag in result["safety_flags"]
+        )
+
+def test_strength_conflict_is_not_reported_as_generic_ambiguity():
+    result = process_prescription(
+        "Warfarin 10 mg\nTake 1 tablet once daily."
+    )
+
+    medicine = result["medicines"][0]
+
+    assert medicine["name"] == "Warfarin"
+    assert medicine["needs_review"] is True
+    assert medicine["strength_verification"] == (
+        "strength_conflict:10mg_vs_5mg"
+    )
+
+    flag_types = [
+        flag["type"]
+        for flag in result["safety_flags"]
+    ]
+
+    assert "strength_conflict" in flag_types
+    assert "ambiguous_medicine" not in flag_types
+
+
+def test_genuine_medicine_review_still_reports_ambiguity():
+    result = process_prescription(
+        "UnknownDrug 5 mg\nTake 1 tablet once daily."
+    )
+
+    flag_types = [
+        flag["type"]
+        for flag in result["safety_flags"]
+    ]
+
+    assert (
+        "ambiguous_medicine" in flag_types
+        or "ocr_extraction_failed" in flag_types
+    )

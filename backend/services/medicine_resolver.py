@@ -1,74 +1,170 @@
-"""
-Medicine Resolution Layer
-
-Makes a safety-oriented decision from ranked medicine hypotheses.
-
-This layer does NOT diagnose or prescribe.
-
-It decides whether the available evidence is:
-
-    - strong enough to accept a hypothesis
-    - uncertain and requires human/pharmacist review
-    - too weak to identify the medicine
-
-The system should prefer uncertainty over an unsafe guess.
-"""
-
 from __future__ import annotations
 
+from typing import Any
 
-# ---------------------------------------------------------
-# Resolution thresholds
-# ---------------------------------------------------------
 
-# Minimum evidence score required for automatic acceptance.
 AUTO_ACCEPT_THRESHOLD = 0.78
-
-# Minimum evidence score for a meaningful hypothesis.
 REVIEW_THRESHOLD = 0.45
-
-# Minimum separation between the first and second hypotheses.
-# A small margin means the candidates are too close.
 MINIMUM_MARGIN = 0.10
 
 
-# ---------------------------------------------------------
-# Utility
-# ---------------------------------------------------------
-
-def _safe_float(value) -> float:
-    """Safely convert a value to float."""
-
+def _safe_float(value: Any) -> float | None:
     try:
+        if value is None:
+            return None
         return float(value)
     except (TypeError, ValueError):
-        return 0.0
+        return None
 
 
-# ---------------------------------------------------------
-# Main resolver
-# ---------------------------------------------------------
+def _normalize_strength_unit(value: Any) -> str | None:
+    if value is None:
+        return None
+
+    unit = str(value).strip().lower()
+
+    aliases = {
+        "milligram": "mg",
+        "milligrams": "mg",
+        "mg": "mg",
+        "microgram": "mcg",
+        "micrograms": "mcg",
+        "mcg": "mcg",
+        "gram": "g",
+        "grams": "g",
+        "g": "g",
+        "milliliter": "ml",
+        "milliliters": "ml",
+        "ml": "ml",
+        "%": "%",
+    }
+
+    return aliases.get(unit, unit)
+
+
+def _extract_candidate_strength(candidate: dict[str, Any]) -> tuple[float, str] | None:
+    value = candidate.get("strength_value")
+    unit = candidate.get("strength_unit")
+
+    if value is None:
+        strength = candidate.get("strength")
+
+        if isinstance(strength, dict):
+            value = strength.get("value")
+            unit = strength.get("unit")
+
+        elif isinstance(strength, str):
+            import re
+
+            match = re.search(
+                r"(\d+(?:\.\d+)?)\s*(mg|mcg|g|ml|%)",
+                strength,
+                re.IGNORECASE,
+            )
+
+            if match:
+                value = match.group(1)
+                unit = match.group(2)
+
+    numeric_value = _safe_float(value)
+    normalized_unit = _normalize_strength_unit(unit)
+
+    if numeric_value is None or normalized_unit is None:
+        return None
+
+    return numeric_value, normalized_unit
+
+
+def _extract_hypothesis_strength(
+    hypothesis: dict[str, Any],
+) -> tuple[float, str] | None:
+    value = hypothesis.get("strength_value")
+    unit = hypothesis.get("strength_unit")
+
+    numeric_value = _safe_float(value)
+    normalized_unit = _normalize_strength_unit(unit)
+
+    if numeric_value is None or normalized_unit is None:
+        return None
+
+    return numeric_value, normalized_unit
+
+
+def _strength_compatibility(
+    candidate: dict[str, Any],
+    hypothesis: dict[str, Any],
+) -> tuple[bool | None, str]:
+    """
+    Returns:
+        (True, reason)   -> explicit strengths match
+        (False, reason)  -> explicit strengths conflict
+        (None, reason)   -> strength cannot be compared
+    """
+
+    candidate_strength = _extract_candidate_strength(candidate)
+    hypothesis_strength = _extract_hypothesis_strength(hypothesis)
+
+    if candidate_strength is None:
+        return None, "candidate_strength_unavailable"
+
+    if hypothesis_strength is None:
+        return None, "hypothesis_strength_unavailable"
+
+    candidate_value, candidate_unit = candidate_strength
+    hypothesis_value, hypothesis_unit = hypothesis_strength
+
+    if candidate_unit != hypothesis_unit:
+        return (
+            False,
+            f"strength_unit_conflict:{candidate_value:g}{candidate_unit}"
+            f"_vs_{hypothesis_value:g}{hypothesis_unit}",
+        )
+
+    if abs(candidate_value - hypothesis_value) > 1e-9:
+        return (
+            False,
+            f"strength_conflict:{candidate_value:g}{candidate_unit}"
+            f"_vs_{hypothesis_value:g}{hypothesis_unit}",
+        )
+
+    return True, "strength_match"
+
+
+def _determine_resolution_status(
+    top_score: float | None,
+    second_score: float | None,
+    ocr_confidence: float | None,
+    strength_compatible: bool | None,
+) -> tuple[str, str]:
+
+    if top_score is None:
+        return "unknown", "missing_evidence_score"
+
+    if strength_compatible is False:
+        return "needs_review", "strength_conflict"
+
+    if top_score < REVIEW_THRESHOLD:
+        return "unknown", "insufficient_evidence"
+
+    if second_score is not None:
+        margin = top_score - second_score
+
+        if margin < MINIMUM_MARGIN:
+            return "needs_review", "ambiguous_match"
+
+    if ocr_confidence is not None and ocr_confidence < 0.40:
+        return "needs_review", "poor_ocr_confidence"
+
+    if top_score >= AUTO_ACCEPT_THRESHOLD:
+        return "accepted", "sufficient_evidence"
+
+    return "needs_review", "moderate_evidence"
+
 
 def resolve_medicine_candidate(
-    candidate: dict,
-    ranked_hypotheses: list[dict],
-) -> dict:
-    """
-    Resolve a medicine candidate using evidence-ranked hypotheses.
-
-    Returns one of:
-
-        accepted
-        needs_review
-        unknown
-
-    The resolver never invents a medicine when evidence
-    is insufficient.
-    """
-
-    # -----------------------------------------------------
-    # No hypotheses
-    # -----------------------------------------------------
+    candidate: dict[str, Any],
+    ranked_hypotheses: list[dict[str, Any]],
+) -> dict[str, Any]:
 
     if not ranked_hypotheses:
         return {
@@ -79,242 +175,94 @@ def resolve_medicine_candidate(
                 "ocr_confidence": _safe_float(
                     candidate.get("ocr_confidence")
                 ),
-                "top_score": 0.0,
-                "second_score": 0.0,
-                "margin": 0.0,
+                "top_score": None,
+                "second_score": None,
+                "margin": None,
             },
             "reason": "no_medicine_hypotheses",
         }
 
-    # -----------------------------------------------------
-    # Top hypothesis
-    # -----------------------------------------------------
-
     top = ranked_hypotheses[0]
 
-    top_score = _safe_float(
-        top.get("evidence_score")
-    )
+    top_score = _safe_float(top.get("evidence_score"))
 
-    # -----------------------------------------------------
-    # Second hypothesis
-    # -----------------------------------------------------
+    if top_score is None:
+        top_score = _safe_float(top.get("score"))
 
-    second_score = (
-        _safe_float(
-            ranked_hypotheses[1].get(
-                "evidence_score"
-            )
+    second_score = None
+
+    if len(ranked_hypotheses) > 1:
+        second = ranked_hypotheses[1]
+
+        second_score = _safe_float(
+            second.get("evidence_score")
         )
-        if len(ranked_hypotheses) > 1
-        else 0.0
+
+        if second_score is None:
+            second_score = _safe_float(
+                second.get("score")
+            )
+
+    margin = (
+        top_score - second_score
+        if top_score is not None and second_score is not None
+        else None
     )
-
-    margin = top_score - second_score
-
-    # -----------------------------------------------------
-    # OCR confidence
-    # -----------------------------------------------------
 
     ocr_confidence = _safe_float(
-        candidate.get(
-            "ocr_confidence",
-            0.0,
-        )
+        candidate.get("ocr_confidence")
     )
 
-    # -----------------------------------------------------
-    # Common response data
-    # -----------------------------------------------------
+    strength_compatible, strength_reason = _strength_compatibility(
+        candidate,
+        top,
+    )
 
-    evidence = {
-        "ocr_confidence": round(
-            ocr_confidence,
-            3,
-        ),
-        "top_score": round(
-            top_score,
-            3,
-        ),
-        "second_score": round(
-            second_score,
-            3,
-        ),
-        "margin": round(
-            margin,
-            3,
-        ),
-    }
+    status, reason = _determine_resolution_status(
+        top_score=top_score,
+        second_score=second_score,
+        ocr_confidence=ocr_confidence,
+        strength_compatible=strength_compatible,
+    )
 
-    # -----------------------------------------------------
-    # Alternatives
-    # -----------------------------------------------------
+    alternatives = []
 
-    alternatives = [
-        {
-            "normalized_name": hypothesis.get(
-                "normalized_name"
-            ),
-            "generic_name": hypothesis.get(
-                "generic_name"
-            ),
-            "strength_value": hypothesis.get(
-                "strength_value"
-            ),
-            "strength_unit": hypothesis.get(
-                "strength_unit"
-            ),
-            "dosage_form": hypothesis.get(
-                "dosage_form"
-            ),
-            "matched_term": hypothesis.get(
-                "matched_term"
-            ),
-            "score": hypothesis.get(
-                "evidence_score"
-            ),
-        }
-        for hypothesis in ranked_hypotheses[1:3]
-    ]
+    for hypothesis in ranked_hypotheses[1:3]:
+        score = _safe_float(
+            hypothesis.get("evidence_score")
+        )
 
-    # -----------------------------------------------------
-    # Safety check 1:
-    # Extremely weak evidence
-    # -----------------------------------------------------
+        if score is None:
+            score = _safe_float(
+                hypothesis.get("score")
+            )
 
-    if top_score < REVIEW_THRESHOLD:
-
-        return {
-            "status": "unknown",
-            "top_hypothesis": None,
-            "alternatives": alternatives,
-            "evidence": evidence,
-            "reason": "evidence_too_weak",
-        }
-
-    # -----------------------------------------------------
-    # Safety check 2:
-    # Competing hypotheses too close
-    # -----------------------------------------------------
-
-    if (
-        len(ranked_hypotheses) > 1
-        and margin < MINIMUM_MARGIN
-    ):
-
-        return {
-            "status": "needs_review",
-            "top_hypothesis": {
-                "normalized_name": top.get(
+        alternatives.append(
+            {
+                "normalized_name": hypothesis.get(
                     "normalized_name"
                 ),
-                "generic_name": top.get(
+                "generic_name": hypothesis.get(
                     "generic_name"
                 ),
-                "strength_value": top.get(
+                "strength_value": hypothesis.get(
                     "strength_value"
                 ),
-                "strength_unit": top.get(
+                "strength_unit": hypothesis.get(
                     "strength_unit"
                 ),
-                "dosage_form": top.get(
+                "dosage_form": hypothesis.get(
                     "dosage_form"
                 ),
-                "matched_term": top.get(
+                "matched_term": hypothesis.get(
                     "matched_term"
                 ),
-                "score": top_score,
-            },
-            "alternatives": alternatives,
-            "evidence": evidence,
-            "reason": (
-                "multiple_medicine_hypotheses_are_close"
-            ),
-        }
-
-    # -----------------------------------------------------
-    # Safety check 3:
-    # Strong evidence but poor OCR
-    #
-    # We still require review when the underlying OCR
-    # confidence is very poor.
-    # -----------------------------------------------------
-
-    if (
-        top_score >= AUTO_ACCEPT_THRESHOLD
-        and ocr_confidence < 0.40
-    ):
-
-        return {
-            "status": "needs_review",
-            "top_hypothesis": {
-                "normalized_name": top.get(
-                    "normalized_name"
-                ),
-                "generic_name": top.get(
-                    "generic_name"
-                ),
-                "strength_value": top.get(
-                    "strength_value"
-                ),
-                "strength_unit": top.get(
-                    "strength_unit"
-                ),
-                "dosage_form": top.get(
-                    "dosage_form"
-                ),
-                "matched_term": top.get(
-                    "matched_term"
-                ),
-                "score": top_score,
-            },
-            "alternatives": alternatives,
-            "evidence": evidence,
-            "reason": (
-                "strong_hypothesis_but_low_ocr_confidence"
-            ),
-        }
-
-    # -----------------------------------------------------
-    # Automatic acceptance
-    # -----------------------------------------------------
-
-    if top_score >= AUTO_ACCEPT_THRESHOLD:
-
-        return {
-            "status": "accepted",
-            "top_hypothesis": {
-                "normalized_name": top.get(
-                    "normalized_name"
-                ),
-                "generic_name": top.get(
-                    "generic_name"
-                ),
-                "strength_value": top.get(
-                    "strength_value"
-                ),
-                "strength_unit": top.get(
-                    "strength_unit"
-                ),
-                "dosage_form": top.get(
-                    "dosage_form"
-                ),
-                "matched_term": top.get(
-                    "matched_term"
-                ),
-                "score": top_score,
-            },
-            "alternatives": alternatives,
-            "evidence": evidence,
-            "reason": "sufficient_evidence",
-        }
-
-    # -----------------------------------------------------
-    # Everything else requires review
-    # -----------------------------------------------------
+                "score": score,
+            }
+        )
 
     return {
-        "status": "needs_review",
+        "status": status,
         "top_hypothesis": {
             "normalized_name": top.get(
                 "normalized_name"
@@ -337,6 +285,13 @@ def resolve_medicine_candidate(
             "score": top_score,
         },
         "alternatives": alternatives,
-        "evidence": evidence,
-        "reason": "best_hypothesis_not_strong_enough",
+        "evidence": {
+            "ocr_confidence": ocr_confidence,
+            "top_score": top_score,
+            "second_score": second_score,
+            "margin": margin,
+            "strength_compatible": strength_compatible,
+            "strength_reason": strength_reason,
+        },
+        "reason": reason,
     }

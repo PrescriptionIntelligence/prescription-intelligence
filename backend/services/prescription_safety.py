@@ -30,6 +30,52 @@ LOW_CONFIDENCE_THRESHOLD = 0.60
 
 
 # ---------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------
+
+def _get_resolution(
+    medicine: dict,
+) -> dict:
+    """
+    Return the medicine resolution object when available.
+
+    The interpreter attaches the resolver output to the
+    canonical medicine record. The helper remains defensive
+    because older records may not contain resolution data.
+    """
+
+    resolution = medicine.get(
+        "resolution"
+    )
+
+    if isinstance(resolution, dict):
+        return resolution
+
+    return {}
+
+
+def _get_resolution_evidence(
+    medicine: dict,
+) -> dict:
+    """
+    Return resolver evidence when available.
+    """
+
+    resolution = _get_resolution(
+        medicine
+    )
+
+    evidence = resolution.get(
+        "evidence"
+    )
+
+    if isinstance(evidence, dict):
+        return evidence
+
+    return {}
+
+
+# ---------------------------------------------------------
 # Individual medicine checks
 # ---------------------------------------------------------
 
@@ -37,7 +83,13 @@ def _check_medicine_resolution(
     medicine: dict,
 ) -> list[dict]:
     """
-    Flag medicine identification uncertainty.
+    Flag genuine medicine identification uncertainty.
+
+    A strength conflict is intentionally handled separately.
+    If the medicine identity itself has been resolved but the
+    prescription strength conflicts with the resolved reference,
+    we should report the strength problem rather than claiming
+    that the medicine identity is uncertain.
     """
 
     issues = []
@@ -46,7 +98,37 @@ def _check_medicine_resolution(
         "status"
     )
 
-    if status != "resolved":
+    resolution = _get_resolution(
+        medicine
+    )
+
+    resolution_status = resolution.get(
+        "status"
+    )
+
+    # The strength-aware interpreter may provide a resolved
+    # medicine even when the final resolution requires review.
+    # In that case, do not automatically label the identity
+    # as uncertain if the reason is specifically strength conflict.
+    resolution_reason = resolution.get(
+        "reason"
+    )
+
+    if (
+        resolution_reason == "strength_conflict"
+        or resolution.get("status") == "needs_review"
+        and _get_resolution_evidence(medicine).get(
+            "strength_compatible"
+        ) is False
+    ):
+        return issues
+
+    if (
+        status != "resolved"
+        and resolution_status not in {
+            "accepted",
+        }
+    ):
 
         issues.append(
             {
@@ -62,11 +144,17 @@ def _check_medicine_resolution(
     return issues
 
 
+# ---------------------------------------------------------
+# Strength checks
+# ---------------------------------------------------------
+
 def _check_strength(
     medicine: dict,
 ) -> list[dict]:
     """
-    Flag missing medicine strength.
+    Flag missing medicine strength and explicit conflicts
+    between the prescription strength and the resolved
+    medicine reference strength.
     """
 
     issues = []
@@ -95,6 +183,92 @@ def _check_strength(
             }
         )
 
+        return issues
+
+    evidence = _get_resolution_evidence(
+        medicine
+    )
+
+    strength_compatible = evidence.get(
+        "strength_compatible"
+    )
+
+    strength_reason = evidence.get(
+        "strength_reason"
+    )
+
+    if (
+        strength_compatible is False
+        or (
+            isinstance(strength_reason, str)
+            and strength_reason.startswith(
+                "strength_conflict:"
+            )
+        )
+    ):
+
+        resolution = _get_resolution(
+            medicine
+        )
+
+        top_hypothesis = resolution.get(
+            "top_hypothesis"
+        )
+
+        if not isinstance(
+            top_hypothesis,
+            dict,
+        ):
+            top_hypothesis = {}
+
+        reference_value = top_hypothesis.get(
+            "strength_value"
+        )
+
+        reference_unit = top_hypothesis.get(
+            "strength_unit"
+        )
+
+        if (
+            reference_value is not None
+            and reference_unit
+        ):
+            message = (
+                f"Prescription strength is "
+                f"{strength_value} {strength_unit}, "
+                f"but the resolved medicine reference "
+                f"indicates {reference_value} "
+                f"{reference_unit}. Verify the prescribed "
+                f"strength before dispensing or clinical use."
+            )
+        else:
+            message = (
+                "The extracted medicine strength conflicts "
+                "with the resolved medicine reference. "
+                "Verify the prescribed strength before "
+                "dispensing or clinical use."
+            )
+
+        issues.append(
+            {
+                "type": "strength_conflict",
+                "severity": "high",
+                "message": message,
+                "prescription_strength": (
+                    f"{strength_value} {strength_unit}"
+                ),
+                "reference_strength": (
+                    f"{reference_value} {reference_unit}"
+                    if (
+                        reference_value is not None
+                        and reference_unit
+                    )
+                    else None
+                ),
+                "resolution_reason": strength_reason,
+            }
+        )
+
     return issues
 
 
@@ -108,17 +282,11 @@ def _check_instructions(
     """
     Flag incomplete or uncertain medication instructions.
 
-    The prescription plan is the source of truth here.
+    Generic medicine review state is NOT treated as evidence
+    that instructions themselves are uncertain.
 
-    The plan builder combines:
-        - parser-extracted structured fields
-        - instruction interpretation
-        - medicine resolution
-
-    Therefore the safety analyzer should evaluate the
-    complete medicine plan rather than expecting the
-    instruction sub-dictionary to contain plan-level
-    review state.
+    Instruction uncertainty must be explicitly represented
+    by instruction-level review fields.
     """
 
     issues = []
@@ -141,14 +309,23 @@ def _check_instructions(
         ]
 
     # -----------------------------------------------------
-    # Plan-level review state
+    # Instruction-specific review state
     # -----------------------------------------------------
 
-    plan_needs_review = medicine_plan.get(
-        "needs_review"
+    instruction_review_required = (
+        medicine_plan.get(
+            "instruction_review_required"
+        )
     )
 
-    if plan_needs_review is True:
+    if instruction_review_required is None:
+        instruction_review_required = (
+            medicine_plan.get(
+                "instructions_needs_review"
+            )
+        )
+
+    if instruction_review_required is True:
 
         issues.append(
             {
