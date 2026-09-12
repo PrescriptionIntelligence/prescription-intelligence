@@ -19,8 +19,10 @@ Severity contract:
     medium
     low
 
-All safety findings returned by this module follow the
-same severity vocabulary used by the report layer.
+Interaction findings are intentionally conservative and are
+limited to the documented knowledge base in this module.
+They must NOT be interpreted as a comprehensive interaction
+database.
 """
 
 from __future__ import annotations
@@ -30,78 +32,107 @@ from __future__ import annotations
 # Known drug-drug interactions
 # ---------------------------------------------------------
 #
-# This is intentionally a small, conservative knowledge base.
+# IMPORTANT:
 #
-# It must NOT be interpreted as a comprehensive interaction
-# database.
+# This is a curated, conservative knowledge base.
 #
-# Only documented interaction pairs should be added.
+# It intentionally contains only drug-drug interactions.
+# Drug-food, drug-alcohol and drug-supplement interactions
+# should be handled by separate future safety modules.
+#
+# The interaction engine never recommends stopping,
+# starting, or changing a medicine.
 # ---------------------------------------------------------
 
 _KNOWN_INTERACTIONS: list[dict] = [
     {
-        "drugs": {"warfarin", "aspirin"},
+        "id": "DDI-WARFARIN-ASPIRIN",
+        "drugs": ["warfarin", "aspirin"],
         "severity": "high",
+        "category": "bleeding_risk",
         "message": (
-            "Warfarin and Aspirin may increase bleeding risk when "
-            "used together. Medical review is strongly recommended."
+            "Warfarin and Aspirin may increase bleeding risk "
+            "when used together. Medical review is strongly "
+            "recommended."
         ),
+        "review_action": (
+            "Review the combination with a doctor or pharmacist."
+        ),
+        "evidence_source": "FDA safety information",
     },
     {
-        "drugs": {"warfarin", "ibuprofen"},
+        "id": "DDI-WARFARIN-IBUPROFEN",
+        "drugs": ["warfarin", "ibuprofen"],
         "severity": "high",
+        "category": "bleeding_risk",
         "message": (
-            "Warfarin and Ibuprofen may increase bleeding risk. "
-            "Medical review is strongly recommended."
+            "Warfarin and Ibuprofen may increase bleeding risk "
+            "when used together. Medical review is strongly "
+            "recommended."
         ),
+        "review_action": (
+            "Review the combination with a doctor or pharmacist."
+        ),
+        "evidence_source": "FDA drug safety information",
     },
     {
-        "drugs": {"metformin", "alcohol"},
-        "severity": "medium",
-        "message": (
-            "Metformin combined with alcohol may increase the risk "
-            "of lactic acidosis. Medical review is recommended."
-        ),
-    },
-    {
-        "drugs": {"simvastatin", "clarithromycin"},
+        "id": "DDI-WARFARIN-NAPROXEN",
+        "drugs": ["warfarin", "naproxen"],
         "severity": "high",
+        "category": "bleeding_risk",
         "message": (
-            "Simvastatin and Clarithromycin combination may increase "
-            "the risk of muscle toxicity (myopathy/rhabdomyolysis)."
+            "Warfarin and Naproxen may increase bleeding risk "
+            "when used together. Medical review is strongly "
+            "recommended."
         ),
+        "review_action": (
+            "Review the combination with a doctor or pharmacist."
+        ),
+        "evidence_source": "FDA drug interaction information",
     },
     {
-        "drugs": {"methotrexate", "nsaids"},
+        "id": "DDI-SIMVASTATIN-CLARITHROMYCIN",
+        "drugs": ["simvastatin", "clarithromycin"],
         "severity": "high",
+        "category": "myopathy_risk",
         "message": (
-            "Methotrexate and NSAIDs (e.g. ibuprofen) may increase "
-            "methotrexate toxicity risk."
+            "Simvastatin and Clarithromycin may substantially "
+            "increase the risk of muscle toxicity, including "
+            "myopathy and rhabdomyolysis."
         ),
+        "review_action": (
+            "Review the combination with a doctor or pharmacist."
+        ),
+        "evidence_source": "FDA prescribing information",
     },
     {
-        "drugs": {"lisinopril", "potassium"},
-        "severity": "medium",
+        "id": "DDI-SIMVASTATIN-ERYTHROMYCIN",
+        "drugs": ["simvastatin", "erythromycin"],
+        "severity": "high",
+        "category": "myopathy_risk",
         "message": (
-            "ACE inhibitors (e.g. Lisinopril) combined with potassium "
-            "supplements may cause hyperkalemia. Review recommended."
+            "Simvastatin and Erythromycin may increase the risk "
+            "of muscle toxicity, including myopathy and "
+            "rhabdomyolysis."
         ),
+        "review_action": (
+            "Review the combination with a doctor or pharmacist."
+        ),
+        "evidence_source": "FDA prescribing information",
     },
     {
-        "drugs": {"ciprofloxacin", "antacids"},
+        "id": "DDI-AMOXICILLIN-METHOTREXATE",
+        "drugs": ["amoxicillin", "methotrexate"],
         "severity": "medium",
+        "category": "toxicity_risk",
         "message": (
-            "Ciprofloxacin absorption is reduced by antacids. "
-            "Separate dosing times by at least 2 hours."
+            "Amoxicillin and Methotrexate may interact and "
+            "increase the risk of methotrexate-related toxicity."
         ),
-    },
-    {
-        "drugs": {"amoxicillin", "methotrexate"},
-        "severity": "medium",
-        "message": (
-            "Amoxicillin may increase methotrexate plasma levels. "
-            "Monitor for signs of toxicity."
+        "review_action": (
+            "Review the combination with a doctor or pharmacist."
         ),
+        "evidence_source": "Drug interaction reference",
     },
 ]
 
@@ -126,16 +157,140 @@ _DAILY_DOSE_LIMITS: dict[str, tuple[float, str]] = {
 
 
 # ---------------------------------------------------------
+# Medicine aliases
+# ---------------------------------------------------------
+#
+# Aliases are used only for interaction matching.
+# They do not change the medicine identity stored by
+# the prescription pipeline.
+# ---------------------------------------------------------
+
+_MEDICINE_ALIASES: dict[str, set[str]] = {
+    "warfarin": {
+        "warfarin",
+        "coumadin",
+    },
+    "aspirin": {
+        "aspirin",
+        "acetylsalicylic acid",
+    },
+    "ibuprofen": {
+        "ibuprofen",
+    },
+    "naproxen": {
+        "naproxen",
+    },
+    "simvastatin": {
+        "simvastatin",
+    },
+    "clarithromycin": {
+        "clarithromycin",
+    },
+    "erythromycin": {
+        "erythromycin",
+    },
+    "amoxicillin": {
+        "amoxicillin",
+        "amoxycillin",
+    },
+    "methotrexate": {
+        "methotrexate",
+        "methotrexate sodium",
+    },
+}
+
+
+# ---------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------
 
 
-def _normalize_for_interaction(name: str) -> str:
+def _normalize_for_interaction(
+    name: str,
+) -> str:
     """
     Normalize a medicine name for interaction lookup.
     """
 
-    return name.strip().lower()
+    if not name:
+        return ""
+
+    normalized = (
+        str(name)
+        .strip()
+        .lower()
+    )
+
+    # Collapse repeated whitespace.
+    normalized = " ".join(
+        normalized.split()
+    )
+
+    return normalized
+
+
+def _medicine_matches_canonical(
+    medicine_name: str,
+    canonical_name: str,
+) -> bool:
+    """
+    Determine whether a medicine name represents the
+    requested canonical medicine.
+
+    Matching is alias-based rather than arbitrary substring
+    matching to reduce false-positive interactions.
+    """
+
+    normalized_name = (
+        _normalize_for_interaction(
+            medicine_name
+        )
+    )
+
+    if not normalized_name:
+        return False
+
+    aliases = _MEDICINE_ALIASES.get(
+        canonical_name,
+        {canonical_name},
+    )
+
+    return normalized_name in aliases
+
+
+def _find_matching_medicines(
+    medicines: list[dict],
+    canonical_name: str,
+) -> list[str]:
+    """
+    Return display names of medicines matching a canonical
+    interaction ingredient.
+    """
+
+    matches = []
+
+    for medicine in medicines:
+
+        medicine_name = (
+            medicine.get("generic_name")
+            or medicine.get("name")
+            or medicine.get(
+                "normalized_name"
+            )
+        )
+
+        if not medicine_name:
+            continue
+
+        if _medicine_matches_canonical(
+            medicine_name,
+            canonical_name,
+        ):
+            matches.append(
+                str(medicine_name)
+            )
+
+    return matches
 
 
 # ---------------------------------------------------------
@@ -161,13 +316,18 @@ def check_duplicate_medicines(
         name = (
             medicine.get("generic_name")
             or medicine.get("name")
+            or medicine.get(
+                "normalized_name"
+            )
         )
 
         if not name:
             continue
 
         normalized_name = (
-            name.strip().lower()
+            _normalize_for_interaction(
+                name
+            )
         )
 
         if normalized_name in seen:
@@ -203,83 +363,86 @@ def check_drug_interactions(
     """
     Check for known documented drug-drug interactions.
 
-    This is intentionally conservative and limited to the
-    interaction pairs defined in _KNOWN_INTERACTIONS.
+    This function is intentionally conservative.
 
-    It must never be interpreted as a comprehensive
-    interaction database.
+    It:
+        - checks only drug-drug interactions
+        - uses canonical names and explicit aliases
+        - avoids arbitrary substring matching
+        - returns structured findings
+        - never recommends changing therapy
+
+    It does NOT:
+        - claim comprehensive interaction coverage
+        - diagnose the patient
+        - recommend stopping medication
+        - recommend changing dosage
     """
 
     flags = []
 
-    present_names = {
-        _normalize_for_interaction(
-            medicine.get("generic_name")
-            or medicine.get("name")
-            or ""
-        )
-        for medicine in medicines
-        if (
-            medicine.get("generic_name")
-            or medicine.get("name")
-        )
-    }
-
     for interaction in _KNOWN_INTERACTIONS:
 
-        interacting_drugs = interaction["drugs"]
+        interacting_drugs = interaction[
+            "drugs"
+        ]
 
-        matched = set()
+        matched_display_names = []
 
-        for drug in interacting_drugs:
+        all_drugs_matched = True
 
-            for name in present_names:
+        for canonical_name in interacting_drugs:
 
-                if (
-                    drug in name
-                    or name in drug
-                ):
-                    matched.add(drug)
-                    break
+            matches = _find_matching_medicines(
+                medicines,
+                canonical_name,
+            )
 
-        if matched != interacting_drugs:
+            if not matches:
+                all_drugs_matched = False
+                break
+
+            matched_display_names.extend(
+                matches
+            )
+
+        if not all_drugs_matched:
             continue
 
-        display_names = []
-
-        for medicine in medicines:
-
-            medicine_name = (
-                medicine.get("generic_name")
-                or medicine.get("name")
-                or ""
+        # Remove duplicates while preserving order.
+        unique_display_names = list(
+            dict.fromkeys(
+                matched_display_names
             )
-
-            normalized_name = (
-                _normalize_for_interaction(
-                    medicine_name
-                )
-            )
-
-            for drug in interacting_drugs:
-
-                if (
-                    drug in normalized_name
-                    or normalized_name in drug
-                ):
-                    display_names.append(
-                        medicine_name
-                    )
-                    break
+        )
 
         flags.append(
             {
                 "type": "drug_interaction",
-                "severity": interaction["severity"],
+                "severity": interaction[
+                    "severity"
+                ],
                 "medicine": " + ".join(
-                    display_names
+                    unique_display_names
                 ),
-                "message": interaction["message"],
+                "matched_drugs": list(
+                    interacting_drugs
+                ),
+                "interaction_id": interaction[
+                    "id"
+                ],
+                "interaction_category": interaction[
+                    "category"
+                ],
+                "message": interaction[
+                    "message"
+                ],
+                "review_action": interaction[
+                    "review_action"
+                ],
+                "evidence_source": interaction[
+                    "evidence_source"
+                ],
             }
         )
 
@@ -312,6 +475,9 @@ def check_ambiguous_medicines(
         name = (
             medicine.get("generic_name")
             or medicine.get("name")
+            or medicine.get(
+                "normalized_name"
+            )
         )
 
         if not name:
@@ -405,6 +571,9 @@ def check_daily_dose_limits(
         medicine_name = (
             medicine.get("generic_name")
             or medicine.get("name")
+            or medicine.get(
+                "normalized_name"
+            )
         )
 
         daily_dose = medicine.get(
@@ -422,7 +591,9 @@ def check_daily_dose_limits(
             continue
 
         name_lower = (
-            medicine_name.strip().lower()
+            _normalize_for_interaction(
+                medicine_name
+            )
         )
 
         limit_entry = _DAILY_DOSE_LIMITS.get(

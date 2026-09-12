@@ -54,8 +54,10 @@ def _assess_ocr_quality(raw_text: str) -> dict:
 
     if word_count >= 10:
         score += 30
+
     elif word_count >= 5:
         score += 15
+
     else:
         issues.append(
             "Very short OCR output — may be incomplete"
@@ -129,6 +131,7 @@ def _assess_ocr_quality(raw_text: str) -> dict:
         issues.append(
             "High proportion of symbols — OCR noise likely"
         )
+
     else:
         score += 20
 
@@ -144,8 +147,10 @@ def _assess_ocr_quality(raw_text: str) -> dict:
 
     if len(lines) >= 3:
         score += 20
+
     elif len(lines) >= 1:
         score += 10
+
     else:
         issues.append(
             "No line structure detected"
@@ -158,8 +163,10 @@ def _assess_ocr_quality(raw_text: str) -> dict:
 
     if score >= 70:
         level = "good"
+
     elif score >= 40:
         level = "fair"
+
     else:
         level = "poor"
 
@@ -300,20 +307,12 @@ def _build_interpreter_candidates(
     format expected by the medicine interpreter.
 
     The original parser records are preserved.
-
-    This adapter exists so the interpretation layer can
-    operate on the parser output without modifying the
-    parser itself.
     """
 
     candidates = []
 
     for medicine in medicines:
         candidate = dict(medicine)
-
-        # -----------------------------------------------------
-        # Preserve the original medicine text.
-        # -----------------------------------------------------
 
         if not candidate.get("text"):
             candidate["text"] = (
@@ -323,10 +322,6 @@ def _build_interpreter_candidates(
                 or ""
             )
 
-        # -----------------------------------------------------
-        # Medicine text expected by the interpreter.
-        # -----------------------------------------------------
-
         if not candidate.get("medicine_text"):
             candidate["medicine_text"] = (
                 candidate.get("name")
@@ -334,10 +329,6 @@ def _build_interpreter_candidates(
                 or candidate.get("text")
                 or ""
             )
-
-        # -----------------------------------------------------
-        # Confidence fields expected by the interpreter.
-        # -----------------------------------------------------
 
         if candidate.get("ocr_confidence") is None:
             candidate["ocr_confidence"] = (
@@ -365,13 +356,14 @@ def _merge_safety_flags(
     safety_analysis: dict,
 ) -> list[dict]:
     """
-    Combine the existing safety-check flags with the newer
-    prescription-safety analysis.
+    Combine all safety findings into one backward-compatible
+    structured safety flag collection.
 
-    Existing flags are preserved for backward compatibility.
+    Existing fields are preserved.
 
-    Safety-analysis issues are converted into the common
-    safety flag shape only when they are not already represented.
+    Additional fields such as interaction_id,
+    interaction_category, matched_drugs, review_action and
+    evidence_source are retained when available.
     """
 
     combined = list(
@@ -385,8 +377,13 @@ def _merge_safety_flags(
             (
                 flag.get("type"),
                 flag.get("medicine"),
+                flag.get("interaction_id"),
             )
         )
+
+    # ---------------------------------------------------------
+    # Medicine-level safety-analysis findings
+    # ---------------------------------------------------------
 
     medicines_analysis = safety_analysis.get(
         "medicines",
@@ -394,6 +391,7 @@ def _merge_safety_flags(
     )
 
     for medicine_report in medicines_analysis:
+
         medicine_name = (
             medicine_report.get(
                 "normalized_name"
@@ -407,6 +405,7 @@ def _merge_safety_flags(
             "issues",
             [],
         ):
+
             issue_type = issue.get(
                 "type"
             )
@@ -417,36 +416,59 @@ def _merge_safety_flags(
             key = (
                 issue_type,
                 medicine_name,
+                issue.get(
+                    "interaction_id"
+                ),
             )
 
             if key in existing_keys:
                 continue
 
+            flag = {
+                "type": issue_type,
+                "severity": issue.get(
+                    "severity",
+                    "low",
+                ),
+                "medicine": medicine_name,
+                "message": issue.get(
+                    "message",
+                    issue_type,
+                ),
+            }
+
+            # Preserve structured safety metadata.
+            for field in (
+                "matched_drugs",
+                "interaction_id",
+                "interaction_category",
+                "review_action",
+                "evidence_source",
+                "daily_dose",
+                "daily_dose_unit",
+                "limit",
+            ):
+
+                if field in issue:
+                    flag[field] = issue[field]
+
             combined.append(
-                {
-                    "type": issue_type,
-                    "severity": issue.get(
-                        "severity",
-                        "low",
-                    ),
-                    "medicine": medicine_name,
-                    "message": issue.get(
-                        "message",
-                        issue_type,
-                    ),
-                }
+                flag
             )
 
-            existing_keys.add(key)
+            existing_keys.add(
+                key
+            )
 
     # ---------------------------------------------------------
-    # Prescription-level safety issues
+    # Prescription-level safety-analysis findings
     # ---------------------------------------------------------
 
     for issue in safety_analysis.get(
         "prescription_issues",
         [],
     ):
+
         issue_type = issue.get(
             "type"
         )
@@ -456,30 +478,321 @@ def _merge_safety_flags(
 
         key = (
             issue_type,
-            None,
+            issue.get("medicine"),
+            issue.get(
+                "interaction_id"
+            ),
         )
 
         if key in existing_keys:
             continue
 
+        flag = {
+            "type": issue_type,
+            "severity": issue.get(
+                "severity",
+                "low",
+            ),
+            "medicine": issue.get(
+                "medicine"
+            ),
+            "message": issue.get(
+                "message",
+                issue_type,
+            ),
+        }
+
+        for field in (
+            "matched_drugs",
+            "interaction_id",
+            "interaction_category",
+            "review_action",
+            "evidence_source",
+            "daily_dose",
+            "daily_dose_unit",
+            "limit",
+        ):
+
+            if field in issue:
+                flag[field] = issue[field]
+
         combined.append(
-            {
-                "type": issue_type,
-                "severity": issue.get(
-                    "severity",
-                    "low",
-                ),
-                "medicine": None,
-                "message": issue.get(
-                    "message",
-                    issue_type,
-                ),
+            flag
+        )
+
+        existing_keys.add(
+            key
+        )
+
+    return combined
+
+
+def _reconcile_safety_analysis(
+    safety_analysis: dict,
+    safety_flags: list[dict],
+) -> dict:
+    """
+    Reconcile the structural safety analysis with the final
+    unified safety flag collection.
+
+    The prescription pipeline has two complementary safety
+    layers:
+
+        1. Prescription-plan structural analysis.
+        2. Legacy / curated safety checks such as:
+           - drug interactions
+           - duplicate medicines
+           - ambiguous medicines
+           - daily-dose limits
+           - validation findings
+
+    The final safety analysis must reflect BOTH layers.
+
+    This function therefore:
+        - recalculates severity counts from final flags
+        - recalculates the final safety status
+        - prevents low-severity informational findings from
+          independently marking a medicine for review
+        - adds prescription-level findings such as DDI results
+          to prescription_issues
+        - preserves structured safety metadata
+    """
+
+    # ---------------------------------------------------------
+    # Severity counts
+    # ---------------------------------------------------------
+
+    high_count = sum(
+        1
+        for flag in safety_flags
+        if flag.get("severity")
+        in (
+            "high",
+            "error",
+        )
+    )
+
+    medium_count = sum(
+        1
+        for flag in safety_flags
+        if flag.get("severity")
+        == "medium"
+    )
+
+    low_count = sum(
+        1
+        for flag in safety_flags
+        if flag.get("severity")
+        == "low"
+    )
+
+    # ---------------------------------------------------------
+    # Final safety status
+    # ---------------------------------------------------------
+
+    if high_count > 0:
+
+        safety_status = "review_required"
+
+    elif medium_count > 0:
+
+        safety_status = "caution"
+
+    elif low_count > 0:
+
+        safety_status = "informational"
+
+    else:
+
+        safety_status = (
+            "no_structural_issues_detected"
+        )
+
+    # ---------------------------------------------------------
+    # Reconcile medicine-level review states
+    # ---------------------------------------------------------
+
+    medicine_reports = safety_analysis.get(
+        "medicines",
+        [],
+    )
+
+    for medicine_report in medicine_reports:
+
+        issues = medicine_report.get(
+            "issues",
+            [],
+        )
+
+        medicine_report["needs_review"] = any(
+            issue.get("severity")
+            in (
+                "high",
+                "medium",
+                "error",
+            )
+            for issue in issues
+        )
+
+    # ---------------------------------------------------------
+    # Prescription-level findings
+    #
+    # The original prescription safety analyzer may contain
+    # duplicate-medicine findings here. We now also expose
+    # final prescription-level safety flags such as DDI.
+    # ---------------------------------------------------------
+
+    existing_prescription_issues = (
+        safety_analysis.get(
+            "prescription_issues",
+            [],
+        )
+    )
+
+    if not isinstance(
+        existing_prescription_issues,
+        list,
+    ):
+        existing_prescription_issues = []
+
+    prescription_issues = list(
+        existing_prescription_issues
+    )
+
+    existing_keys = {
+        (
+            issue.get("type"),
+            issue.get("medicine"),
+            issue.get("interaction_id"),
+        )
+        for issue in prescription_issues
+    }
+
+    for flag in safety_flags:
+
+        flag_type = flag.get(
+            "type"
+        )
+
+        if not flag_type:
+            continue
+
+        # A finding is prescription-level when it has no
+        # single medicine, or when it represents an interaction
+        # between multiple medicines.
+        matched_drugs = flag.get(
+            "matched_drugs"
+        )
+
+        is_multi_medicine = (
+            isinstance(
+                matched_drugs,
+                list,
+            )
+            and len(matched_drugs) > 1
+        )
+
+        is_prescription_level = (
+            flag.get("medicine") is None
+            or is_multi_medicine
+            or flag_type
+            in {
+                "drug_interaction",
+                "duplicate_medicine",
             }
         )
 
-        existing_keys.add(key)
+        if not is_prescription_level:
+            continue
 
-    return combined
+        key = (
+            flag_type,
+            flag.get("medicine"),
+            flag.get("interaction_id"),
+        )
+
+        if key in existing_keys:
+            continue
+
+        issue = {
+            "type": flag_type,
+            "severity": flag.get(
+                "severity",
+                "low",
+            ),
+            "medicine": flag.get(
+                "medicine"
+            ),
+            "message": flag.get(
+                "message",
+                flag_type,
+            ),
+        }
+
+        for field in (
+            "matched_drugs",
+            "interaction_id",
+            "interaction_category",
+            "review_action",
+            "evidence_source",
+            "daily_dose",
+            "daily_dose_unit",
+            "limit",
+        ):
+
+            if field in flag:
+                issue[field] = flag[field]
+
+        prescription_issues.append(
+            issue
+        )
+
+        existing_keys.add(
+            key
+        )
+
+    # ---------------------------------------------------------
+    # Update the unified safety analysis
+    # ---------------------------------------------------------
+
+    safety_analysis["safety_status"] = (
+        safety_status
+    )
+
+    safety_analysis["medicine_count"] = (
+        safety_analysis.get(
+            "medicine_count",
+            len(medicine_reports),
+        )
+    )
+
+    safety_analysis["issue_count"] = (
+        high_count
+        + medium_count
+        + low_count
+    )
+
+    safety_analysis["high_severity_count"] = (
+        high_count
+    )
+
+    safety_analysis["medium_severity_count"] = (
+        medium_count
+    )
+
+    safety_analysis["low_severity_count"] = (
+        low_count
+    )
+
+    safety_analysis["medicines"] = (
+        medicine_reports
+    )
+
+    safety_analysis["prescription_issues"] = (
+        prescription_issues
+    )
+
+    return safety_analysis
 
 
 def process_prescription(
@@ -508,12 +821,15 @@ def process_prescription(
             ↓
         Legacy safety checks
             ↓
+        Unified safety reconciliation
+            ↓
+        Confidence / review state
+            ↓
         Unified pipeline result
 
-    Important:
-        This system is an interpretation and safety-support
-        system. It does not diagnose, prescribe, or independently
-        determine clinical appropriateness.
+    This system is decision support only.
+    It does not diagnose, prescribe, or independently determine
+    clinical appropriateness.
     """
 
     raw_text = raw_text or ""
@@ -573,7 +889,7 @@ def process_prescription(
     )
 
     # =========================================================
-    # 7. New prescription-level safety analysis
+    # 7. Prescription-level structural safety analysis
     # =========================================================
 
     safety_analysis = analyze_prescription_safety(
@@ -581,7 +897,7 @@ def process_prescription(
     )
 
     # =========================================================
-    # 8. Existing safety checks
+    # 8. Existing / curated safety checks
     # =========================================================
 
     safety_flags = []
@@ -685,12 +1001,21 @@ def process_prescription(
     )
 
     # =========================================================
-    # 9. Merge new safety-analysis results
+    # 9. Merge structural safety-analysis results
     # =========================================================
 
     safety_flags = _merge_safety_flags(
         safety_flags,
         safety_analysis,
+    )
+
+    # =========================================================
+    # 9A. Reconcile the COMPLETE final safety state
+    # =========================================================
+
+    safety_analysis = _reconcile_safety_analysis(
+        safety_analysis,
+        safety_flags,
     )
 
     # =========================================================
@@ -723,7 +1048,10 @@ def process_prescription(
     )
 
     interpretation_requires_review = (
-        interpretation.get("review_required_count", 0)
+        interpretation.get(
+            "review_required_count",
+            0,
+        )
         > 0
     )
 
@@ -794,12 +1122,9 @@ def process_prescription(
     # =========================================================
 
     return {
-        # Existing public pipeline outputs
         "medicines": medicines,
         "safety_flags": safety_flags,
         "analysis_metadata": analysis_metadata,
-
-        # New intelligence layers
         "interpretation": interpretation,
         "prescription_plan": prescription_plan,
         "safety_analysis": safety_analysis,
