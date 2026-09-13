@@ -16,8 +16,6 @@ from backend.security import decode_access_token
 # =========================================================
 
 oauth2_scheme = OAuth2PasswordBearer(
-    # /auth/token accepts OAuth2 form-encoded credentials (Swagger Authorize).
-    # /auth/login accepts JSON credentials (frontend application).
     tokenUrl="/auth/token",
 )
 
@@ -40,7 +38,6 @@ def get_current_user(
 
     try:
         payload = decode_access_token(token)
-
         user_id = payload.get("sub")
 
         if not user_id:
@@ -79,11 +76,7 @@ def get_current_user(
 def require_pharmacist(
     current_user: UserDB = Depends(get_current_user),
 ) -> UserDB:
-
-    if current_user.role not in {
-        "pharmacist",
-        "admin",
-    }:
+    if current_user.role not in {"pharmacist", "admin"}:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Pharmacist access required",
@@ -92,14 +85,49 @@ def require_pharmacist(
     return current_user
 
 
+def require_customer(
+    current_user: UserDB = Depends(get_current_user),
+) -> UserDB:
+    if current_user.role != "customer":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Customer access required",
+        )
+
+    return current_user
+
+
 def require_admin(
     current_user: UserDB = Depends(get_current_user),
 ) -> UserDB:
-
     if current_user.role != "admin":
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Administrator access required",
         )
 
+    return current_user
+
+
+def require_pharmacy_staff(
+    current_user: UserDB = Depends(get_current_user),
+) -> UserDB:
+    """
+    Access for pharmacy-side users only.
+
+    Admin is intentionally excluded here because platform-wide
+    admin operations should use require_admin explicitly.
+    """
+    if current_user.role != "pharmacist":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Pharmacy staff access required",
+        )
+
+    return current_user
+
+
+def require_any_authenticated_user(
+    current_user: UserDB = Depends(get_current_user),
+) -> UserDB:
     return current_user

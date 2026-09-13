@@ -9,6 +9,7 @@ from sqlalchemy import (
     String,
     Text,
     Boolean,
+    UniqueConstraint,
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -79,6 +80,11 @@ class OrganizationDB(Base):
         back_populates="organization",
     )
 
+    customer_memberships: Mapped[list["CustomerOrganizationDB"]] = relationship(
+        back_populates="organization",
+        cascade="all, delete-orphan",
+    )
+
 
 # =========================================================
 # USER / ACCOUNT
@@ -115,7 +121,7 @@ class UserDB(Base):
         nullable=False,
     )
 
-    # pharmacist | admin
+    # pharmacist | admin | customer
     role: Mapped[str] = mapped_column(
         String(30),
         default="pharmacist",
@@ -153,6 +159,12 @@ class UserDB(Base):
         foreign_keys="PrescriptionDB.reviewed_by_id",
     )
 
+    customer_profile: Mapped["CustomerDB | None"] = relationship(
+        back_populates="user",
+        foreign_keys="CustomerDB.user_id",
+        uselist=False,
+    )
+
 
 # =========================================================
 # CUSTOMER / PATIENT
@@ -164,6 +176,17 @@ class CustomerDB(Base):
     id: Mapped[UUID] = mapped_column(
         primary_key=True,
         default=uuid4,
+    )
+
+    # Optional link to a customer login account.
+    #
+    # A pharmacy can create a customer profile before the
+    # customer creates an account, so this remains nullable.
+    user_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("users.id"),
+        nullable=True,
+        unique=True,
+        index=True,
     )
 
     organization_id: Mapped[UUID] = mapped_column(
@@ -227,6 +250,12 @@ class CustomerDB(Base):
         onupdate=lambda: datetime.now(timezone.utc),
     )
 
+    user: Mapped["UserDB | None"] = relationship(
+        back_populates="customer_profile",
+        foreign_keys=[user_id],
+        uselist=False,
+    )
+
     organization: Mapped["OrganizationDB"] = relationship(
         back_populates="customers",
     )
@@ -235,6 +264,62 @@ class CustomerDB(Base):
         back_populates="customer",
     )
 
+    organization_memberships: Mapped[list["CustomerOrganizationDB"]] = relationship(
+        back_populates="customer",
+        foreign_keys="CustomerOrganizationDB.customer_id",
+        cascade="all, delete-orphan",
+    )
+
+class CustomerOrganizationDB(Base):
+    """
+    Associates a customer with one or more pharmacy organizations.
+
+    A customer can use multiple pharmacies while keeping
+    one global customer account.
+    """
+
+    __tablename__ = "customer_organizations"
+
+    id: Mapped[UUID] = mapped_column(
+        primary_key=True,
+        default=uuid4,
+    )
+
+    customer_id: Mapped[UUID] = mapped_column(
+        ForeignKey("customers.id"),
+        nullable=False,
+        index=True,
+    )
+
+    organization_id: Mapped[UUID] = mapped_column(
+        ForeignKey("organizations.id"),
+        nullable=False,
+        index=True,
+    )
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        nullable=False,
+    )
+
+    customer: Mapped["CustomerDB"] = relationship(
+        back_populates="organization_memberships",
+        foreign_keys=[customer_id],
+    )
+
+    organization: Mapped["OrganizationDB"] = relationship(
+        back_populates="customer_memberships",
+        foreign_keys=[organization_id],
+    )
+
+    __table_args__ = (
+        UniqueConstraint(
+            "customer_id",
+            "organization_id",
+            name="uq_customer_organization",
+        ),
+    )
 
 # =========================================================
 # PRESCRIPTION
@@ -386,6 +471,93 @@ class PrescriptionDB(Base):
     medicines: Mapped[list["MedicineDB"]] = relationship(
         back_populates="prescription",
         cascade="all, delete-orphan",
+    )
+
+
+# =========================================================
+# PRESCRIPTION REVIEW AUDIT
+# =========================================================
+
+class ReviewAuditDB(Base):
+    """
+    Immutable audit record for every human review action.
+
+    This table records what happened during prescription review.
+    Existing records should never be edited or deleted as part
+    of normal application behavior.
+    """
+
+    __tablename__ = "review_audits"
+
+    id: Mapped[UUID] = mapped_column(
+        primary_key=True,
+        default=uuid4,
+    )
+
+    prescription_id: Mapped[UUID] = mapped_column(
+        ForeignKey("prescriptions.id"),
+        nullable=False,
+        index=True,
+    )
+
+    reviewer_id: Mapped[UUID] = mapped_column(
+        ForeignKey("users.id"),
+        nullable=False,
+        index=True,
+    )
+
+    # confirm | correct | dismiss | clarify | start_review
+    action: Mapped[str] = mapped_column(
+        String(30),
+        nullable=False,
+        index=True,
+    )
+
+    previous_status: Mapped[str] = mapped_column(
+        String(30),
+        nullable=False,
+    )
+
+    new_status: Mapped[str] = mapped_column(
+        String(30),
+        nullable=False,
+    )
+
+    # Example:
+    # strength_conflict
+    # ambiguous_medicine
+    # interaction
+    # ocr_empty
+    finding_type: Mapped[str | None] = mapped_column(
+        String(100),
+        nullable=True,
+        index=True,
+    )
+
+    # Snapshot of the finding at the moment of review.
+    finding_data: Mapped[dict | None] = mapped_column(
+        JSON,
+        nullable=True,
+    )
+
+    note: Mapped[str | None] = mapped_column(
+        Text,
+        nullable=True,
+    )
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        nullable=False,
+        index=True,
+    )
+
+    prescription: Mapped["PrescriptionDB"] = relationship(
+        foreign_keys=[prescription_id],
+    )
+
+    reviewer: Mapped["UserDB"] = relationship(
+        foreign_keys=[reviewer_id],
     )
 
 

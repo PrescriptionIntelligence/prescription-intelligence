@@ -4,7 +4,7 @@ from pydantic import BaseModel, EmailStr, Field
 from sqlalchemy.orm import Session
 
 from backend.database import get_db
-from backend.models import OrganizationDB, UserDB
+from backend.models import CustomerDB, OrganizationDB, UserDB
 from backend.security import (
     create_access_token,
     hash_password,
@@ -23,6 +23,14 @@ router = APIRouter(
 # =========================================================
 
 class RegisterRequest(BaseModel):
+    """
+    Pharmacy registration.
+
+    Creates:
+        OrganizationDB
+        UserDB(role="pharmacist")
+    """
+
     name: str = Field(
         min_length=2,
         max_length=200,
@@ -41,6 +49,38 @@ class RegisterRequest(BaseModel):
     )
 
 
+class CustomerRegisterRequest(BaseModel):
+    """
+    Customer self-registration.
+
+    Customer accounts are not tied to one pharmacy.
+    A customer can therefore have prescriptions from
+    multiple pharmacies.
+    """
+
+    name: str = Field(
+        min_length=2,
+        max_length=200,
+    )
+
+    email: EmailStr
+
+    password: str = Field(
+        min_length=8,
+        max_length=128,
+    )
+
+    phone: str | None = Field(
+        default=None,
+        max_length=30,
+    )
+
+    customer_code: str | None = Field(
+        default=None,
+        max_length=50,
+    )
+
+
 class LoginRequest(BaseModel):
     email: EmailStr
 
@@ -51,47 +91,68 @@ class LoginRequest(BaseModel):
 
 
 # =========================================================
-# SHARED AUTHENTICATION HELPER
+# HELPERS
 # =========================================================
 
-def _authenticate(email: str, password: str, db: Session) -> dict:
-    """
-    Verify credentials and return the token response dict.
+def _normalize_email(email: str) -> str:
+    return email.strip().lower()
 
-    Raises HTTPException on invalid credentials or inactive account.
-    Used by both the JSON login endpoint and the OAuth2 token endpoint.
+
+def _generate_unique_customer_code(
+    name: str,
+    db: Session,
+) -> str:
+    """
+    Generate a unique internal customer code.
+
+    Example:
+        JOHN-4821
     """
 
-    user = (
-        db.query(UserDB)
-        .filter(UserDB.email == email.strip().lower())
-        .first()
+    import secrets
+
+    prefix = "".join(
+        character
+        for character in name.upper()
+        if character.isalnum()
+    )[:8]
+
+    if not prefix:
+        prefix = "CUSTOMER"
+
+    for _ in range(20):
+        code = f"{prefix}-{secrets.randbelow(9000) + 1000}"
+
+        existing = (
+            db.query(CustomerDB)
+            .filter(
+                CustomerDB.customer_code == code
+            )
+            .first()
+        )
+
+        if not existing:
+            return code
+
+    raise HTTPException(
+        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        detail="Unable to generate a unique customer code",
     )
 
-    if not user or not verify_password(password, user.password_hash):
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid email or password",
-        )
 
-    if not user.is_active:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="User account is inactive",
-        )
+def _build_auth_response(
+    user: UserDB,
+    token: str,
+    message: str,
+) -> dict:
+    """
+    Build the common authentication response.
+    """
 
     organization = user.organization
 
-    token = create_access_token(
-        user_id=str(user.id),
-        role=user.role,
-        organization_id=(
-            str(user.organization_id) if user.organization_id else None
-        ),
-    )
-
     return {
-        "message": "Login successful",
+        "message": message,
         "access_token": token,
         "token_type": "bearer",
         "user": {
@@ -100,7 +161,9 @@ def _authenticate(email: str, password: str, db: Session) -> dict:
             "email": user.email,
             "role": user.role,
             "organization_id": (
-                str(user.organization_id) if user.organization_id else None
+                str(user.organization_id)
+                if user.organization_id
+                else None
             ),
         },
         "organization": (
@@ -116,7 +179,74 @@ def _authenticate(email: str, password: str, db: Session) -> dict:
 
 
 # =========================================================
-# REGISTER
+# SHARED AUTHENTICATION
+# =========================================================
+
+def _authenticate(
+    email: str,
+    password: str,
+    db: Session,
+) -> dict:
+    """
+    Authenticate pharmacist, customer, or admin.
+    """
+
+    normalized_email = _normalize_email(email)
+
+    user = (
+        db.query(UserDB)
+        .filter(
+            UserDB.email == normalized_email
+        )
+        .first()
+    )
+
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid email or password",
+            headers={
+                "WWW-Authenticate": "Bearer",
+            },
+        )
+
+    if not verify_password(
+        password,
+        user.password_hash,
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid email or password",
+            headers={
+                "WWW-Authenticate": "Bearer",
+            },
+        )
+
+    if not user.is_active:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="User account is inactive",
+        )
+
+    token = create_access_token(
+        user_id=str(user.id),
+        role=user.role,
+        organization_id=(
+            str(user.organization_id)
+            if user.organization_id
+            else None
+        ),
+    )
+
+    return _build_auth_response(
+        user=user,
+        token=token,
+        message="Login successful",
+    )
+
+
+# =========================================================
+# PHARMACY REGISTRATION
 # =========================================================
 
 @router.post(
@@ -128,16 +258,21 @@ def register(
     db: Session = Depends(get_db),
 ):
     """
-    Register a new pharmacist and create their pharmacy
-    organization.
+    Register a new pharmacy and its first pharmacist.
 
-    The first user of an organization becomes its pharmacist.
+    Public registration can only create a pharmacist account.
+
+    Admin accounts are intentionally NOT created here.
     """
+
+    normalized_email = _normalize_email(
+        request.email
+    )
 
     existing_user = (
         db.query(UserDB)
         .filter(
-            UserDB.email == request.email.lower()
+            UserDB.email == normalized_email
         )
         .first()
     )
@@ -149,7 +284,7 @@ def register(
         )
 
     # -----------------------------------------------------
-    # Generate organization slug
+    # Generate unique organization slug
     # -----------------------------------------------------
 
     base_slug = (
@@ -164,14 +299,16 @@ def register(
 
     while (
         db.query(OrganizationDB)
-        .filter(OrganizationDB.slug == slug)
+        .filter(
+            OrganizationDB.slug == slug
+        )
         .first()
     ):
         slug = f"{base_slug}-{counter}"
         counter += 1
 
     # -----------------------------------------------------
-    # Create organization
+    # Create pharmacy organization
     # -----------------------------------------------------
 
     organization = OrganizationDB(
@@ -183,13 +320,13 @@ def register(
     db.flush()
 
     # -----------------------------------------------------
-    # Create pharmacist
+    # Create pharmacist account
     # -----------------------------------------------------
 
     user = UserDB(
         organization_id=organization.id,
         name=request.name.strip(),
-        email=request.email.lower(),
+        email=normalized_email,
         password_hash=hash_password(
             request.password
         ),
@@ -200,6 +337,7 @@ def register(
 
     try:
         db.commit()
+
         db.refresh(user)
         db.refresh(organization)
 
@@ -207,9 +345,13 @@ def register(
         db.rollback()
 
         raise HTTPException(
-            status_code=500,
-            detail="Failed to create account",
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to create pharmacy account",
         )
+
+    # -----------------------------------------------------
+    # Login immediately after registration
+    # -----------------------------------------------------
 
     token = create_access_token(
         user_id=str(user.id),
@@ -219,29 +361,120 @@ def register(
         ),
     )
 
-    return {
-        "message": "Account created successfully",
-        "access_token": token,
-        "token_type": "bearer",
-        "user": {
-            "id": str(user.id),
-            "name": user.name,
-            "email": user.email,
-            "role": user.role,
-            "organization_id": str(
-                organization.id
-            ),
-        },
-        "organization": {
-            "id": str(organization.id),
-            "name": organization.name,
-            "slug": organization.slug,
-        },
-    }
+    return _build_auth_response(
+        user=user,
+        token=token,
+        message="Account created successfully",
+    )
 
 
 # =========================================================
-# LOGIN  (JSON body — used by the frontend application)
+# CUSTOMER REGISTRATION
+# =========================================================
+
+@router.post(
+    "/register/customer",
+    status_code=status.HTTP_201_CREATED,
+)
+def register_customer(
+    request: CustomerRegisterRequest,
+    db: Session = Depends(get_db),
+):
+    """
+    Register a customer account.
+
+    IMPORTANT:
+    A customer is not assigned to a single pharmacy.
+
+    This allows the same customer to have prescriptions
+    associated with Pharmacy A, Pharmacy B, Pharmacy C, etc.
+
+    The CustomerDB organization_id is currently required by
+    the existing database schema, so the customer UserDB
+    account is created first.
+
+    The CustomerDB profile will be linked when the customer
+    is associated with a pharmacy/prescription.
+    """
+
+    normalized_email = _normalize_email(
+        request.email
+    )
+
+    # -----------------------------------------------------
+    # Prevent duplicate account
+    # -----------------------------------------------------
+
+    existing_user = (
+        db.query(UserDB)
+        .filter(
+            UserDB.email == normalized_email
+        )
+        .first()
+    )
+
+    if existing_user:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="An account with this email already exists",
+        )
+
+    # -----------------------------------------------------
+    # Create customer UserDB account
+    # -----------------------------------------------------
+
+    user = UserDB(
+        organization_id=None,
+        name=request.name.strip(),
+        email=normalized_email,
+        password_hash=hash_password(
+            request.password
+        ),
+        role="customer",
+    )
+
+    db.add(user)
+
+    try:
+        db.commit()
+        db.refresh(user)
+
+    except Exception:
+        db.rollback()
+
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to create customer account",
+        )
+
+    # -----------------------------------------------------
+    # Customer JWT
+    # -----------------------------------------------------
+
+    token = create_access_token(
+        user_id=str(user.id),
+        role="customer",
+        organization_id=None,
+    )
+
+    response = _build_auth_response(
+        user=user,
+        token=token,
+        message="Customer account created successfully",
+    )
+
+    # Customer-specific information for the frontend.
+    response["customer"] = {
+        "profile_linked": False,
+        "customer_code": request.customer_code,
+        "phone": request.phone,
+    }
+
+    return response
+
+
+# =========================================================
+# LOGIN
 # =========================================================
 
 @router.post("/login")
@@ -250,16 +483,24 @@ def login(
     db: Session = Depends(get_db),
 ):
     """
-    Authenticate with a JSON body containing ``email`` and ``password``.
+    JSON login endpoint used by the frontend.
 
-    Used by the frontend application.
-    Returns a full response including user and organization details.
+    Supports:
+
+        pharmacist
+        customer
+        admin
     """
-    return _authenticate(request.email, request.password, db)
+
+    return _authenticate(
+        email=request.email,
+        password=request.password,
+        db=db,
+    )
 
 
 # =========================================================
-# TOKEN  (form-encoded — used by Swagger UI OAuth2 flow)
+# OAUTH2 TOKEN
 # =========================================================
 
 @router.post(
@@ -267,10 +508,9 @@ def login(
     summary="OAuth2 token endpoint (Swagger Authorize)",
     description=(
         "OAuth2 password-flow token endpoint. "
-        "Accepts ``username`` (your email) and ``password`` "
-        "as ``application/x-www-form-urlencoded``. "
-        "This is the endpoint wired to the Swagger Authorize button. "
-        "For application use, prefer ``POST /auth/login`` with a JSON body."
+        "Accepts username (email) and password "
+        "as application/x-www-form-urlencoded. "
+        "Used by Swagger Authorize."
     ),
 )
 def token(
@@ -278,11 +518,14 @@ def token(
     db: Session = Depends(get_db),
 ):
     """
-    OAuth2 password-flow token endpoint consumed by Swagger UI.
+    OAuth2 password-flow endpoint used by Swagger UI.
 
-    The ``username`` field in the form maps to the user's email address.
-    Returns ``access_token`` and ``token_type`` as required by the
-    OAuth2 specification, plus the same extended fields as ``/auth/login``.
+    username = user's email
+    password = user's password
     """
-    # OAuth2PasswordRequestForm uses `username`; this application uses email.
-    return _authenticate(form_data.username, form_data.password, db)
+
+    return _authenticate(
+        email=form_data.username,
+        password=form_data.password,
+        db=db,
+    )

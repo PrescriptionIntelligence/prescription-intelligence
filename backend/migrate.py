@@ -19,8 +19,10 @@ from backend.models import (
     OrganizationDB,
     UserDB,
     CustomerDB,
+    CustomerOrganizationDB,
     PrescriptionDB,
     MedicineDB,
+    ReviewAuditDB,
 )
 
 
@@ -57,9 +59,7 @@ def add_column_if_missing(
             )
         )
 
-        print(
-            f"Added {table_name}.{column_name}"
-        )
+        print(f"Added {table_name}.{column_name}")
 
 
 def main():
@@ -71,9 +71,7 @@ def main():
         # Create new tables
         # -------------------------------------------------
 
-        Base.metadata.create_all(
-            bind=connection
-        )
+        Base.metadata.create_all(bind=connection)
 
         print("Verified all tables.")
 
@@ -163,6 +161,39 @@ def main():
         )
 
         # -------------------------------------------------
+        # Customer account relationship
+        # -------------------------------------------------
+
+        add_column_if_missing(
+            connection,
+            "customers",
+            "user_id",
+            "UUID",
+        )
+
+        # -------------------------------------------------
+        # Customer ↔ Organization association
+        # -------------------------------------------------
+
+        if not inspect(connection).has_table(
+            "customer_organizations"
+        ):
+            Base.metadata.create_all(
+                bind=connection,
+                tables=[
+                    CustomerOrganizationDB.__table__
+                ],
+            )
+
+            print(
+                "Created customer_organizations table."
+            )
+        else:
+            print(
+                "Verified customer_organizations table."
+            )
+
+        # -------------------------------------------------
         # Foreign keys
         #
         # PostgreSQL will reject duplicates, so we check
@@ -227,6 +258,29 @@ def main():
             )
 
         # -------------------------------------------------
+        # Customer → User foreign key
+        # -------------------------------------------------
+
+        customer_constraints = {
+            item["name"]
+            for item in inspector.get_foreign_keys(
+                "customers"
+            )
+        }
+
+        if "fk_customers_user" not in customer_constraints:
+            connection.execute(
+                text(
+                    """
+                    ALTER TABLE customers
+                    ADD CONSTRAINT fk_customers_user
+                    FOREIGN KEY (user_id)
+                    REFERENCES users(id)
+                    """
+                )
+            )
+
+        # -------------------------------------------------
         # Indexes
         # -------------------------------------------------
 
@@ -280,23 +334,39 @@ def main():
             )
         )
 
+        connection.execute(
+            text(
+                """
+                CREATE UNIQUE INDEX IF NOT EXISTS
+                ix_customers_user_id_unique
+                ON customers (user_id)
+                """
+            )
+        )
+
     print("")
     print("Migration completed successfully.")
     print("")
-    print("Next architecture layer:")
+    print("Current architecture:")
     print("  Organization")
     print("      ↓")
-    print("  Pharmacist accounts")
-    print("      ↓")
-    print("  Customers")
-    print("      ↓")
-    print("  Prescriptions")
-    print("      ↓")
-    print("  Medicine intelligence")
-    print("      ↓")
-    print("  Human review")
-    print("      ↓")
-    print("  Admin oversight")
+    print("  Users")
+    print("      ├── Admin")
+    print("      ├── Pharmacist")
+    print("      └── Customer")
+    print("              ↓")
+    print("          Customer Profile")
+    print("              ↓")
+    print("          Prescriptions")
+    print("              ↓")
+    print("       Medicine intelligence")
+    print("              ↓")
+    print("         Human review")
+    print("")
+    print("Privacy model:")
+    print("  Pharmacy → own organization data")
+    print("  Customer → own prescriptions across pharmacies")
+    print("  Admin    → platform oversight")
 
 
 if __name__ == "__main__":

@@ -43,6 +43,31 @@ def api_client(tmp_path, monkeypatch):
         tmp_path,
     )
 
+    # Test-only authenticated pharmacist.
+    #
+    # Prescription API tests should exercise prescription/OCR/report
+    # behavior, not the authentication implementation. Production
+    # authentication remains enabled because this override exists only
+    # inside the pytest fixture.
+    from types import SimpleNamespace
+    from uuid import uuid4
+
+    test_user = SimpleNamespace(
+        id=uuid4(),
+        name="Test Pharmacist",
+        email="test.pharmacist@example.com",
+        role="pharmacist",
+        organization_id=uuid4(),
+        is_active=True,
+    )
+
+    # Import the actual authentication dependency used by the API.
+    from backend.auth import get_current_user
+
+    app.dependency_overrides[get_current_user] = (
+        lambda: test_user
+    )
+
     client = TestClient(
         app,
         raise_server_exceptions=False,
@@ -50,6 +75,7 @@ def api_client(tmp_path, monkeypatch):
 
     yield client
 
+    app.dependency_overrides.pop(get_current_user, None)
     app.dependency_overrides.pop(get_db, None)
     engine.dispose()
 

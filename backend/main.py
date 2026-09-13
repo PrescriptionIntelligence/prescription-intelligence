@@ -5,43 +5,78 @@ from pathlib import Path
 from uuid import uuid4
 
 from PIL import Image
-from backend.routers import auth, users
-from fastapi import Depends, FastAPI, File, HTTPException, UploadFile
+
+from backend.routers import (
+    auth,
+    users,
+    reviews,
+    customers,
+)
+
+from fastapi import (
+    Depends,
+    FastAPI,
+    File,
+    HTTPException,
+    UploadFile,
+)
+
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from fastapi.staticfiles import StaticFiles
+
 from sqlalchemy import func
 from sqlalchemy.orm import Session, selectinload
 
+from backend.auth import (
+    require_admin,
+    require_any_authenticated_user,
+    require_pharmacy_staff,
+)
+
 from backend.database import get_db
-from backend.models import PrescriptionDB, MedicineDB
+
+from backend.models import (
+    CustomerDB,
+    MedicineDB,
+    PrescriptionDB,
+    UserDB,
+)
+
 from backend.schemas import (
+    DashboardStatsResponse,
     PrescriptionCreate,
     PrescriptionResponse,
     PrescriptionUploadResponse,
-    DashboardStatsResponse,
 )
+
 from backend.services.ocr_service import extract_text_from_image
 from backend.services.prescription_pipeline import process_prescription
 from backend.services.prescription_report import build_prescription_report
 from backend.services.pdf_report_generator import generate_prescription_pdf
 
+
 logger = logging.getLogger(__name__)
 
-# ---------------------------------------------------------
-# Paths
-# ---------------------------------------------------------
+
+# =========================================================
+# PATHS
+# =========================================================
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 
 UPLOAD_DIR = BASE_DIR / "uploads"
-UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+UPLOAD_DIR.mkdir(
+    parents=True,
+    exist_ok=True,
+)
 
-MAX_UPLOAD_BYTES = 10 * 1024 * 1024  # 10 MB
+MAX_UPLOAD_BYTES = 10 * 1024 * 1024
 
-# ---------------------------------------------------------
-# FastAPI application
-# ---------------------------------------------------------
+
+# =========================================================
+# FASTAPI APPLICATION
+# =========================================================
 
 app = FastAPI(
     title="Prescription Intelligence API",
@@ -52,16 +87,32 @@ app = FastAPI(
     version="1.0.0",
 )
 
+
+# =========================================================
+# ROUTERS
+# =========================================================
+
 app.include_router(auth.router)
 app.include_router(users.router)
+app.include_router(reviews.router)
+app.include_router(customers.router)
 
-# Serve uploaded prescription images at /uploads/<filename>
-# so the frontend can display the original image.
+# =========================================================
+# STATIC UPLOADS
+# =========================================================
+
 app.mount(
     "/uploads",
-    StaticFiles(directory=str(UPLOAD_DIR)),
+    StaticFiles(
+        directory=str(UPLOAD_DIR)
+    ),
     name="uploads",
 )
+
+
+# =========================================================
+# CORS
+# =========================================================
 
 _allowed_origins = os.getenv(
     "CORS_ORIGINS",
@@ -76,9 +127,10 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ---------------------------------------------------------
-# Root
-# ---------------------------------------------------------
+
+# =========================================================
+# ROOT
+# =========================================================
 
 
 @app.get("/")
@@ -90,9 +142,9 @@ def root():
     }
 
 
-# ---------------------------------------------------------
-# Health
-# ---------------------------------------------------------
+# =========================================================
+# HEALTH
+# =========================================================
 
 
 @app.get("/health")
@@ -102,9 +154,9 @@ def health():
     }
 
 
-# ---------------------------------------------------------
-# Dashboard statistics
-# ---------------------------------------------------------
+# =========================================================
+# DASHBOARD STATISTICS
+# =========================================================
 
 
 @app.get(
@@ -113,60 +165,221 @@ def health():
     tags=["Dashboard"],
 )
 def get_dashboard_stats(
+    current_user: UserDB = Depends(
+        require_any_authenticated_user
+    ),
     db: Session = Depends(get_db),
 ):
     """
-    Return aggregate statistics for the dashboard.
+    Return dashboard statistics according to the user's role.
+
+    Pharmacist:
+        Only their organization's data.
+
+    Customer:
+        Only their own prescriptions.
+
+    Admin:
+        Platform-wide statistics.
     """
 
+    # -----------------------------------------------------
+    # Determine prescription scope
+    # -----------------------------------------------------
+
+    prescription_query = db.query(
+        PrescriptionDB
+    )
+
+    if current_user.role == "pharmacist":
+        if not current_user.organization_id:
+            raise HTTPException(
+                status_code=403,
+                detail=(
+                    "Pharmacist is not associated "
+                    "with an organization"
+                ),
+            )
+
+        prescription_query = prescription_query.filter(
+            PrescriptionDB.organization_id
+            == current_user.organization_id
+        )
+
+    elif current_user.role == "customer":
+        customer = (
+            db.query(CustomerDB)
+            .filter(
+                CustomerDB.user_id
+                == current_user.id
+            )
+            .first()
+        )
+
+        if not customer:
+            prescription_query = prescription_query.filter(
+                PrescriptionDB.id == None
+            )
+        else:
+            prescription_query = prescription_query.filter(
+                PrescriptionDB.customer_id
+                == customer.id
+            )
+
+    elif current_user.role == "admin":
+        pass
+
+    else:
+        raise HTTPException(
+            status_code=403,
+            detail="Unsupported user role",
+        )
+
+    # -----------------------------------------------------
+    # Total prescriptions
+    # -----------------------------------------------------
+
     total_prescriptions = (
-        db.query(func.count(PrescriptionDB.id))
-        .scalar()
+        prescription_query.with_entities(
+            func.count(PrescriptionDB.id)
+        ).scalar()
     ) or 0
+
+    # -----------------------------------------------------
+    # Total medicines
+    # -----------------------------------------------------
+
+    medicine_query = db.query(
+        MedicineDB
+    ).join(
+        PrescriptionDB,
+        MedicineDB.prescription_id
+        == PrescriptionDB.id,
+    )
+
+    if current_user.role == "pharmacist":
+        medicine_query = medicine_query.filter(
+            PrescriptionDB.organization_id
+            == current_user.organization_id
+        )
+
+    elif current_user.role == "customer":
+        customer = (
+            db.query(CustomerDB)
+            .filter(
+                CustomerDB.user_id
+                == current_user.id
+            )
+            .first()
+        )
+
+        if customer:
+            medicine_query = medicine_query.filter(
+                PrescriptionDB.customer_id
+                == customer.id
+            )
+        else:
+            medicine_query = medicine_query.filter(
+                PrescriptionDB.id == None
+            )
 
     total_medicines = (
-        db.query(func.count(MedicineDB.id))
-        .scalar()
+        medicine_query.with_entities(
+            func.count(MedicineDB.id)
+        ).scalar()
     ) or 0
 
-    # Prescriptions that have at least one safety flag.
-    # safety_flags is a JSONB array; use jsonb_array_length for PostgreSQL.
-    # Wrapped in a try/except to gracefully handle environments that don't
-    # support the jsonb_array_length function (e.g. SQLite in tests).
+    # -----------------------------------------------------
+    # Prescriptions with safety flags
+    # -----------------------------------------------------
+
     try:
         prescriptions_with_flags = (
-            db.query(func.count(PrescriptionDB.id))
-            .filter(
-                PrescriptionDB.safety_flags.isnot(None),
+            prescription_query.filter(
+                PrescriptionDB.safety_flags.isnot(
+                    None
+                ),
                 func.jsonb_array_length(
                     PrescriptionDB.safety_flags
                 ) > 0,
-            )
-            .scalar()
+            ).with_entities(
+                func.count(PrescriptionDB.id)
+            ).scalar()
         ) or 0
+
     except Exception:
         prescriptions_with_flags = 0
 
-    # Prescriptions requiring review = low normalization
-    # confidence or any safety flag present.
-    needs_review = (
-        db.query(func.count(PrescriptionDB.id.distinct()))
+    # -----------------------------------------------------
+    # Prescriptions requiring review
+    # -----------------------------------------------------
+
+    review_query = (
+        db.query(
+            PrescriptionDB.id
+        )
         .join(
             MedicineDB,
-            MedicineDB.prescription_id == PrescriptionDB.id,
+            MedicineDB.prescription_id
+            == PrescriptionDB.id,
         )
-        .filter(
-            (MedicineDB.normalization_confidence < 0.70)
-            | (MedicineDB.extraction_confidence < 0.70)
+    )
+
+    if current_user.role == "pharmacist":
+        review_query = review_query.filter(
+            PrescriptionDB.organization_id
+            == current_user.organization_id
         )
-        .scalar()
+
+    elif current_user.role == "customer":
+        customer = (
+            db.query(CustomerDB)
+            .filter(
+                CustomerDB.user_id
+                == current_user.id
+            )
+            .first()
+        )
+
+        if customer:
+            review_query = review_query.filter(
+                PrescriptionDB.customer_id
+                == customer.id
+            )
+        else:
+            review_query = review_query.filter(
+                PrescriptionDB.id == None
+            )
+
+    needs_review = (
+        review_query.filter(
+            (
+                MedicineDB.normalization_confidence
+                < 0.70
+            )
+            | (
+                MedicineDB.extraction_confidence
+                < 0.70
+            )
+        )
+        .distinct()
+        .count()
     ) or 0
 
-    # 5 most recent prescriptions for the "recent" list
+    # -----------------------------------------------------
+    # Recent prescriptions
+    # -----------------------------------------------------
+
     recent = (
-        db.query(PrescriptionDB)
-        .options(selectinload(PrescriptionDB.medicines))
-        .order_by(PrescriptionDB.created_at.desc())
+        prescription_query
+        .options(
+            selectinload(
+                PrescriptionDB.medicines
+            )
+        )
+        .order_by(
+            PrescriptionDB.created_at.desc()
+        )
         .limit(5)
         .all()
     )
@@ -174,44 +387,61 @@ def get_dashboard_stats(
     recent_list = []
 
     for rx in recent:
-        medicine_count = len(rx.medicines)
-        safety_count = len(rx.safety_flags or [])
+        medicine_count = len(
+            rx.medicines
+        )
 
-        # Compute a simple confidence summary from medicines
+        safety_count = len(
+            rx.safety_flags or []
+        )
+
         confidences = [
-            m.normalization_confidence
-            for m in rx.medicines
-            if m.normalization_confidence is not None
+            medicine.normalization_confidence
+            for medicine in rx.medicines
+            if medicine.normalization_confidence
+            is not None
         ]
 
         avg_confidence = (
-            round(sum(confidences) / len(confidences), 2)
+            round(
+                sum(confidences)
+                / len(confidences),
+                2,
+            )
             if confidences
             else None
         )
 
-        recent_list.append({
-            "prescription_id": rx.prescription_id,
-            "file_name": rx.file_name,
-            "created_at": rx.created_at.isoformat(),
-            "status": rx.status,
-            "medicine_count": medicine_count,
-            "safety_count": safety_count,
-            "avg_confidence": avg_confidence,
-        })
+        recent_list.append(
+            {
+                "prescription_id": (
+                    rx.prescription_id
+                ),
+                "file_name": rx.file_name,
+                "created_at": (
+                    rx.created_at.isoformat()
+                ),
+                "status": rx.status,
+                "medicine_count": medicine_count,
+                "safety_count": safety_count,
+                "avg_confidence": avg_confidence,
+            }
+        )
 
     return {
         "total_prescriptions": total_prescriptions,
         "total_medicines": total_medicines,
-        "prescriptions_with_alerts": prescriptions_with_flags,
+        "prescriptions_with_alerts": (
+            prescriptions_with_flags
+        ),
         "needs_review": needs_review,
         "recent_prescriptions": recent_list,
     }
 
 
-# ---------------------------------------------------------
-# Create prescription manually
-# ---------------------------------------------------------
+# =========================================================
+# CREATE PRESCRIPTION MANUALLY
+# =========================================================
 
 
 @app.post(
@@ -222,8 +452,30 @@ def get_dashboard_stats(
 )
 def create_prescription(
     prescription: PrescriptionCreate,
+    current_user: UserDB = Depends(
+        require_pharmacy_staff
+    ),
     db: Session = Depends(get_db),
 ):
+    """
+    Create a prescription manually.
+
+    Only pharmacy staff can create prescriptions.
+
+    The prescription is automatically assigned to:
+        organization_id = pharmacist's pharmacy
+        uploaded_by_id = current pharmacist
+    """
+
+    if not current_user.organization_id:
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                "Pharmacist is not associated "
+                "with an organization"
+            ),
+        )
+
     existing = (
         db.query(PrescriptionDB)
         .filter(
@@ -240,16 +492,24 @@ def create_prescription(
         )
 
     db_prescription = PrescriptionDB(
-        prescription_id=prescription.prescription_id,
+        prescription_id=(
+            prescription.prescription_id
+        ),
         raw_text=prescription.raw_text,
         status="uploaded",
+        organization_id=(
+            current_user.organization_id
+        ),
+        uploaded_by_id=current_user.id,
     )
 
     for medicine in prescription.medicines:
         strength_value = medicine.strength_value
 
         if strength_value is not None:
-            strength_value = str(strength_value)
+            strength_value = str(
+                strength_value
+            )
 
         db_medicine = MedicineDB(
             name=medicine.name,
@@ -264,18 +524,30 @@ def create_prescription(
             strength_unit=medicine.strength_unit,
             dose_value=medicine.dose_value,
             dose_unit=medicine.dose_unit,
-            daily_dose_value=medicine.daily_dose_value,
-            daily_dose_unit=medicine.daily_dose_unit,
+            daily_dose_value=(
+                medicine.daily_dose_value
+            ),
+            daily_dose_unit=(
+                medicine.daily_dose_unit
+            ),
             daily_dose_components=getattr(
                 medicine,
                 "daily_dose_components",
                 None,
             ),
             route=medicine.route,
-            frequency_value=medicine.frequency_value,
-            frequency_unit=medicine.frequency_unit,
-            duration_value=medicine.duration_value,
-            duration_unit=medicine.duration_unit,
+            frequency_value=(
+                medicine.frequency_value
+            ),
+            frequency_unit=(
+                medicine.frequency_unit
+            ),
+            duration_value=(
+                medicine.duration_value
+            ),
+            duration_unit=(
+                medicine.duration_unit
+            ),
             instructions=medicine.instructions,
             extraction_confidence=(
                 medicine.extraction_confidence
@@ -285,7 +557,9 @@ def create_prescription(
             ),
         )
 
-        db_prescription.medicines.append(db_medicine)
+        db_prescription.medicines.append(
+            db_medicine
+        )
 
     try:
         db.add(db_prescription)
@@ -294,6 +568,13 @@ def create_prescription(
 
     except Exception as exc:
         db.rollback()
+
+        logger.error(
+            "Failed to save prescription: %s",
+            exc,
+            exc_info=True,
+        )
+
         raise HTTPException(
             status_code=500,
             detail=(
@@ -305,9 +586,9 @@ def create_prescription(
     return db_prescription
 
 
-# ---------------------------------------------------------
-# Upload prescription image
-# ---------------------------------------------------------
+# =========================================================
+# UPLOAD PRESCRIPTION IMAGE
+# =========================================================
 
 
 @app.post(
@@ -317,8 +598,29 @@ def create_prescription(
 )
 async def upload_prescription(
     file: UploadFile = File(...),
+    current_user: UserDB = Depends(
+        require_pharmacy_staff
+    ),
     db: Session = Depends(get_db),
 ):
+    """
+    Upload and analyze a prescription image.
+
+    Only pharmacy staff can upload prescriptions.
+
+    The uploaded prescription automatically belongs
+    to the pharmacist's organization.
+    """
+
+    if not current_user.organization_id:
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                "Pharmacist is not associated "
+                "with an organization"
+            ),
+        )
+
     allowed_types = {
         "image/jpeg": ".jpg",
         "image/png": ".png",
@@ -334,11 +636,20 @@ async def upload_prescription(
             ),
         )
 
-    extension = allowed_types[file.content_type]
+    extension = allowed_types[
+        file.content_type
+    ]
 
     file_id = uuid4()
-    stored_filename = f"{file_id}{extension}"
-    file_path = UPLOAD_DIR / stored_filename
+
+    stored_filename = (
+        f"{file_id}{extension}"
+    )
+
+    file_path = (
+        UPLOAD_DIR
+        / stored_filename
+    )
 
     contents = await file.read()
 
@@ -352,40 +663,64 @@ async def upload_prescription(
         raise HTTPException(
             status_code=413,
             detail=(
-                f"File exceeds maximum allowed size of "
+                "File exceeds maximum allowed "
+                "size of "
                 f"{MAX_UPLOAD_BYTES // (1024 * 1024)} MB"
             ),
         )
 
+    # -----------------------------------------------------
+    # Save image
+    # -----------------------------------------------------
+
     try:
-        with open(file_path, "wb") as buffer:
+        with open(
+            file_path,
+            "wb",
+        ) as buffer:
             buffer.write(contents)
 
     except Exception as exc:
         raise HTTPException(
             status_code=500,
             detail=(
-                f"Failed to save uploaded file: {str(exc)}"
+                "Failed to save uploaded file: "
+                f"{str(exc)}"
             ),
         )
 
+    # -----------------------------------------------------
+    # Validate image
+    # -----------------------------------------------------
+
     try:
-        image = Image.open(file_path)
+        image = Image.open(
+            file_path
+        )
+
         image.load()
 
     except Exception as exc:
-        # Remove the corrupted file
-        file_path.unlink(missing_ok=True)
+        file_path.unlink(
+            missing_ok=True
+        )
 
         raise HTTPException(
             status_code=400,
             detail=(
-                f"Invalid or corrupted image file: {str(exc)}"
+                "Invalid or corrupted image file: "
+                f"{str(exc)}"
             ),
         )
 
+    # -----------------------------------------------------
+    # OCR
+    # -----------------------------------------------------
+
     try:
-        raw_text = extract_text_from_image(image)
+        raw_text = extract_text_from_image(
+            image
+        )
 
     except Exception as exc:
         logger.error(
@@ -396,15 +731,20 @@ async def upload_prescription(
 
         raise HTTPException(
             status_code=500,
-            detail=f"OCR processing failed: {str(exc)}",
+            detail=(
+                "OCR processing failed: "
+                f"{str(exc)}"
+            ),
         )
 
-    # -----------------------------------------------------
-    # OCR failure
-    # -----------------------------------------------------
+    # =====================================================
+    # OCR FAILURE
+    # =====================================================
 
     if not raw_text or not raw_text.strip():
-        prescription_id = f"RX-{file_id.hex[:8].upper()}"
+        prescription_id = (
+            f"RX-{file_id.hex[:8].upper()}"
+        )
 
         db_prescription = PrescriptionDB(
             prescription_id=prescription_id,
@@ -413,27 +753,46 @@ async def upload_prescription(
             file_name=file.filename,
             file_path=str(file_path),
             file_type=file.content_type,
+            organization_id=(
+                current_user.organization_id
+            ),
+            uploaded_by_id=current_user.id,
             safety_flags=[
                 {
                     "type": "ocr_empty",
                     "severity": "error",
                     "medicine": None,
                     "message": (
-                        "OCR could not extract any text from this image. "
-                        "Please upload a clearer, well-lit image."
+                        "OCR could not extract any "
+                        "text from this image. "
+                        "Please upload a clearer, "
+                        "well-lit image."
                     ),
                 }
             ],
         )
 
-        db.add(db_prescription)
-        db.commit()
-        db.refresh(db_prescription)
+        try:
+            db.add(db_prescription)
+            db.commit()
+            db.refresh(db_prescription)
+
+        except Exception as exc:
+            db.rollback()
+
+            raise HTTPException(
+                status_code=500,
+                detail=(
+                    "Failed to save OCR failure: "
+                    f"{str(exc)}"
+                ),
+            )
 
         return {
             "message": (
-                "Prescription uploaded but OCR could not extract "
-                "any text. Please review the image quality."
+                "Prescription uploaded but OCR "
+                "could not extract any text. "
+                "Please review the image quality."
             ),
             "prescription_id": prescription_id,
             "file_name": file.filename,
@@ -443,7 +802,9 @@ async def upload_prescription(
             "status": "ocr_failed",
             "raw_text": "",
             "medicines": [],
-            "safety_flags": db_prescription.safety_flags,
+            "safety_flags": (
+                db_prescription.safety_flags
+            ),
             "analysis_metadata": {
                 "ocr_quality": "failed",
                 "ocr_text_length": 0,
@@ -452,12 +813,14 @@ async def upload_prescription(
             },
         }
 
-    # -----------------------------------------------------
-    # Prescription intelligence pipeline
-    # -----------------------------------------------------
+    # =====================================================
+    # PRESCRIPTION INTELLIGENCE PIPELINE
+    # =====================================================
 
     try:
-        analysis = process_prescription(raw_text)
+        analysis = process_prescription(
+            raw_text
+        )
 
     except Exception as exc:
         logger.error(
@@ -469,11 +832,15 @@ async def upload_prescription(
         raise HTTPException(
             status_code=500,
             detail=(
-                f"Prescription processing failed: {str(exc)}"
+                "Prescription processing failed: "
+                f"{str(exc)}"
             ),
         )
 
-    medicines = analysis.get("medicines", [])
+    medicines = analysis.get(
+        "medicines",
+        [],
+    )
 
     safety_flags = analysis.get(
         "safety_flags",
@@ -500,7 +867,9 @@ async def upload_prescription(
         {},
     )
 
-    prescription_id = f"RX-{file_id.hex[:8].upper()}"
+    prescription_id = (
+        f"RX-{file_id.hex[:8].upper()}"
+    )
 
     db_prescription = PrescriptionDB(
         prescription_id=prescription_id,
@@ -509,26 +878,51 @@ async def upload_prescription(
         file_name=file.filename,
         file_path=str(file_path),
         file_type=file.content_type,
+        organization_id=(
+            current_user.organization_id
+        ),
+        uploaded_by_id=current_user.id,
         safety_flags=safety_flags,
     )
 
+    # -----------------------------------------------------
+    # Store medicines
+    # -----------------------------------------------------
+
     for medicine in medicines:
-        strength_value = medicine.get("strength_value")
+        strength_value = medicine.get(
+            "strength_value"
+        )
 
         if strength_value is not None:
-            strength_value = str(strength_value)
+            strength_value = str(
+                strength_value
+            )
 
         db_medicine = MedicineDB(
             name=medicine.get("name"),
-            generic_name=medicine.get("generic_name"),
-            brand_name=medicine.get("brand_name"),
-            strength_value=strength_value,
-            strength_unit=medicine.get("strength_unit"),
-            strength_components=(
-                medicine.get("strength_components") or []
+            generic_name=medicine.get(
+                "generic_name"
             ),
-            dose_value=medicine.get("dose_value"),
-            dose_unit=medicine.get("dose_unit"),
+            brand_name=medicine.get(
+                "brand_name"
+            ),
+            strength_value=strength_value,
+            strength_unit=medicine.get(
+                "strength_unit"
+            ),
+            strength_components=(
+                medicine.get(
+                    "strength_components"
+                )
+                or []
+            ),
+            dose_value=medicine.get(
+                "dose_value"
+            ),
+            dose_unit=medicine.get(
+                "dose_unit"
+            ),
             daily_dose_value=medicine.get(
                 "daily_dose_value"
             ),
@@ -536,9 +930,14 @@ async def upload_prescription(
                 "daily_dose_unit"
             ),
             daily_dose_components=(
-                medicine.get("daily_dose_components") or []
+                medicine.get(
+                    "daily_dose_components"
+                )
+                or []
             ),
-            route=medicine.get("route"),
+            route=medicine.get(
+                "route"
+            ),
             frequency_value=medicine.get(
                 "frequency_value"
             ),
@@ -562,7 +961,13 @@ async def upload_prescription(
             ),
         )
 
-        db_prescription.medicines.append(db_medicine)
+        db_prescription.medicines.append(
+            db_medicine
+        )
+
+    # -----------------------------------------------------
+    # Save
+    # -----------------------------------------------------
 
     try:
         db.add(db_prescription)
@@ -572,19 +977,30 @@ async def upload_prescription(
     except Exception as exc:
         db.rollback()
 
+        logger.error(
+            "Failed to save analyzed prescription: %s",
+            exc,
+            exc_info=True,
+        )
+
         raise HTTPException(
             status_code=500,
-            detail=f"Failed to save prescription: {str(exc)}",
+            detail=(
+                "Failed to save prescription: "
+                f"{str(exc)}"
+            ),
         )
 
     if medicines:
         message = (
-            "Prescription uploaded and analyzed successfully"
+            "Prescription uploaded and analyzed "
+            "successfully"
         )
     else:
         message = (
-            "Prescription uploaded, but no medicines could be "
-            "reliably extracted. Manual verification is required."
+            "Prescription uploaded, but no medicines "
+            "could be reliably extracted. Manual "
+            "verification is required."
         )
 
     return {
@@ -605,9 +1021,9 @@ async def upload_prescription(
     }
 
 
-# ---------------------------------------------------------
-# Prescription history (paginated)
-# ---------------------------------------------------------
+# =========================================================
+# PRESCRIPTION HISTORY
+# =========================================================
 
 
 @app.get(
@@ -618,23 +1034,113 @@ async def upload_prescription(
 def list_prescriptions(
     skip: int = 0,
     limit: int = 20,
+    current_user: UserDB = Depends(
+        require_any_authenticated_user
+    ),
     db: Session = Depends(get_db),
 ):
-    prescriptions = (
+    """
+    List prescriptions according to role.
+
+    Pharmacist:
+        Only prescriptions belonging to their pharmacy.
+
+    Customer:
+        Only their own prescriptions.
+
+    Admin:
+        All prescriptions.
+    """
+
+    if skip < 0:
+        raise HTTPException(
+            status_code=400,
+            detail="skip cannot be negative",
+        )
+
+    if limit < 1 or limit > 100:
+        raise HTTPException(
+            status_code=400,
+            detail="limit must be between 1 and 100",
+        )
+
+    query = (
         db.query(PrescriptionDB)
-        .options(selectinload(PrescriptionDB.medicines))
-        .order_by(PrescriptionDB.created_at.desc())
+        .options(
+            selectinload(
+                PrescriptionDB.medicines
+            )
+        )
+    )
+
+    # -----------------------------------------------------
+    # Pharmacist
+    # -----------------------------------------------------
+
+    if current_user.role == "pharmacist":
+        if not current_user.organization_id:
+            raise HTTPException(
+                status_code=403,
+                detail=(
+                    "Pharmacist is not associated "
+                    "with an organization"
+                ),
+            )
+
+        query = query.filter(
+            PrescriptionDB.organization_id
+            == current_user.organization_id
+        )
+
+    # -----------------------------------------------------
+    # Customer
+    # -----------------------------------------------------
+
+    elif current_user.role == "customer":
+        customer = (
+            db.query(CustomerDB)
+            .filter(
+                CustomerDB.user_id
+                == current_user.id
+            )
+            .first()
+        )
+
+        if not customer:
+            return []
+
+        query = query.filter(
+            PrescriptionDB.customer_id
+            == customer.id
+        )
+
+    # -----------------------------------------------------
+    # Admin
+    # -----------------------------------------------------
+
+    elif current_user.role == "admin":
+        pass
+
+    else:
+        raise HTTPException(
+            status_code=403,
+            detail="Unsupported user role",
+        )
+
+    return (
+        query
+        .order_by(
+            PrescriptionDB.created_at.desc()
+        )
         .offset(skip)
         .limit(limit)
         .all()
     )
 
-    return prescriptions
 
-
-# ---------------------------------------------------------
-# Generate prescription PDF report
-# ---------------------------------------------------------
+# =========================================================
+# GENERATE PRESCRIPTION PDF REPORT
+# =========================================================
 
 
 @app.get(
@@ -643,19 +1149,24 @@ def list_prescriptions(
 )
 def download_prescription_report(
     prescription_id: str,
+    current_user: UserDB = Depends(
+        require_any_authenticated_user
+    ),
     db: Session = Depends(get_db),
 ):
     """
-    Generate and return a PDF intelligence report for a prescription.
+    Generate a PDF intelligence report.
 
-    The report is generated from the stored OCR text so that the same
-    prescription intelligence pipeline is used consistently without
-    requiring any database schema changes.
+    Access is restricted according to user role.
     """
 
     prescription = (
         db.query(PrescriptionDB)
-        .options(selectinload(PrescriptionDB.medicines))
+        .options(
+            selectinload(
+                PrescriptionDB.medicines
+            )
+        )
         .filter(
             PrescriptionDB.prescription_id
             == prescription_id
@@ -670,14 +1181,29 @@ def download_prescription_report(
         )
 
     # -----------------------------------------------------
-    # Re-run the intelligence pipeline from stored OCR text
+    # Authorization
     # -----------------------------------------------------
 
-    raw_text = prescription.raw_text or ""
+    _ensure_prescription_access(
+        prescription=prescription,
+        current_user=current_user,
+        db=db,
+    )
+
+    raw_text = (
+        prescription.raw_text
+        or ""
+    )
+
+    # -----------------------------------------------------
+    # Re-run intelligence pipeline
+    # -----------------------------------------------------
 
     if raw_text.strip():
         try:
-            analysis = process_prescription(raw_text)
+            analysis = process_prescription(
+                raw_text
+            )
 
         except Exception as exc:
             logger.error(
@@ -690,8 +1216,9 @@ def download_prescription_report(
             raise HTTPException(
                 status_code=500,
                 detail=(
-                    "Unable to generate the prescription analysis "
-                    f"for the report: {str(exc)}"
+                    "Unable to generate the "
+                    "prescription analysis for "
+                    f"the report: {str(exc)}"
                 ),
             )
 
@@ -716,10 +1243,6 @@ def download_prescription_report(
         )
 
     else:
-        # -------------------------------------------------
-        # OCR-failed prescription
-        # -------------------------------------------------
-
         analysis_metadata = {
             "ocr_quality": "failed",
             "ocr_text_length": 0,
@@ -749,20 +1272,23 @@ def download_prescription_report(
                     "medicine": None,
                     "title": "OCR extraction failed",
                     "message": (
-                        "OCR could not extract any prescription text. "
-                        "Manual verification is required."
+                        "OCR could not extract any "
+                        "prescription text. Manual "
+                        "verification is required."
                     ),
                 }
             ],
         }
 
     # -----------------------------------------------------
-    # Build structured report
+    # Build report
     # -----------------------------------------------------
 
     report = build_prescription_report(
         safety_analysis,
-        prescription_id=prescription.prescription_id,
+        prescription_id=(
+            prescription.prescription_id
+        ),
         file_name=prescription.file_name,
         raw_text=raw_text,
         analysis_metadata=analysis_metadata,
@@ -775,7 +1301,9 @@ def download_prescription_report(
     # -----------------------------------------------------
 
     try:
-        pdf_bytes = generate_prescription_pdf(report)
+        pdf_bytes = generate_prescription_pdf(
+            report
+        )
 
     except Exception as exc:
         logger.error(
@@ -787,7 +1315,10 @@ def download_prescription_report(
 
         raise HTTPException(
             status_code=500,
-            detail=f"Failed to generate PDF report: {str(exc)}",
+            detail=(
+                "Failed to generate PDF report: "
+                f"{str(exc)}"
+            ),
         )
 
     filename = (
@@ -806,9 +1337,9 @@ def download_prescription_report(
     )
 
 
-# ---------------------------------------------------------
-# Get prescription by ID
-# ---------------------------------------------------------
+# =========================================================
+# GET PRESCRIPTION BY ID
+# =========================================================
 
 
 @app.get(
@@ -818,11 +1349,24 @@ def download_prescription_report(
 )
 def get_prescription(
     prescription_id: str,
+    current_user: UserDB = Depends(
+        require_any_authenticated_user
+    ),
     db: Session = Depends(get_db),
 ):
+    """
+    Get one prescription.
+
+    Access is restricted according to role.
+    """
+
     prescription = (
         db.query(PrescriptionDB)
-        .options(selectinload(PrescriptionDB.medicines))
+        .options(
+            selectinload(
+                PrescriptionDB.medicines
+            )
+        )
         .filter(
             PrescriptionDB.prescription_id
             == prescription_id
@@ -836,12 +1380,18 @@ def get_prescription(
             detail="Prescription not found",
         )
 
+    _ensure_prescription_access(
+        prescription=prescription,
+        current_user=current_user,
+        db=db,
+    )
+
     return prescription
 
 
-# ---------------------------------------------------------
-# Medicine lookup
-# ---------------------------------------------------------
+# =========================================================
+# MEDICINE LOOKUP
+# =========================================================
 
 
 @app.get(
@@ -850,22 +1400,98 @@ def get_prescription(
 )
 def lookup_medicine(
     q: str,
+    current_user: UserDB = Depends(
+        require_any_authenticated_user
+    ),
     db: Session = Depends(get_db),
 ):
     """
-    Look up medicines by name fragment.
-    Returns matching medicines from the analysis history.
+    Look up medicines.
+
+    Pharmacists:
+        Medicines from their organization's prescriptions.
+
+    Customers:
+        Medicines from their own prescriptions.
+
+    Admin:
+        All medicines.
     """
 
     if not q or len(q.strip()) < 2:
         raise HTTPException(
             status_code=400,
-            detail="Search query must be at least 2 characters",
+            detail=(
+                "Search query must be at least "
+                "2 characters"
+            ),
+        )
+
+    query = (
+        db.query(MedicineDB)
+        .join(
+            PrescriptionDB,
+            MedicineDB.prescription_id
+            == PrescriptionDB.id,
+        )
+    )
+
+    # -----------------------------------------------------
+    # Pharmacist
+    # -----------------------------------------------------
+
+    if current_user.role == "pharmacist":
+        if not current_user.organization_id:
+            raise HTTPException(
+                status_code=403,
+                detail=(
+                    "Pharmacist is not associated "
+                    "with an organization"
+                ),
+            )
+
+        query = query.filter(
+            PrescriptionDB.organization_id
+            == current_user.organization_id
+        )
+
+    # -----------------------------------------------------
+    # Customer
+    # -----------------------------------------------------
+
+    elif current_user.role == "customer":
+        customer = (
+            db.query(CustomerDB)
+            .filter(
+                CustomerDB.user_id
+                == current_user.id
+            )
+            .first()
+        )
+
+        if not customer:
+            return []
+
+        query = query.filter(
+            PrescriptionDB.customer_id
+            == customer.id
+        )
+
+    # -----------------------------------------------------
+    # Admin
+    # -----------------------------------------------------
+
+    elif current_user.role == "admin":
+        pass
+
+    else:
+        raise HTTPException(
+            status_code=403,
+            detail="Unsupported user role",
         )
 
     results = (
-        db.query(MedicineDB)
-        .filter(
+        query.filter(
             MedicineDB.name.ilike(
                 f"%{q.strip()}%"
             )
@@ -876,11 +1502,106 @@ def lookup_medicine(
 
     return [
         {
-            "name": m.name,
-            "generic_name": m.generic_name,
-            "brand_name": m.brand_name,
-            "strength_value": m.strength_value,
-            "strength_unit": m.strength_unit,
+            "name": medicine.name,
+            "generic_name": (
+                medicine.generic_name
+            ),
+            "brand_name": (
+                medicine.brand_name
+            ),
+            "strength_value": (
+                medicine.strength_value
+            ),
+            "strength_unit": (
+                medicine.strength_unit
+            ),
         }
-        for m in results
+        for medicine in results
     ]
+
+
+# =========================================================
+# PRESCRIPTION ACCESS CONTROL
+# =========================================================
+
+
+def _ensure_prescription_access(
+    prescription: PrescriptionDB,
+    current_user: UserDB,
+    db: Session,
+):
+    """
+    Central authorization check for prescriptions.
+
+    Rules:
+
+        Admin
+            → all prescriptions
+
+        Pharmacist
+            → prescriptions belonging to
+              their organization
+
+        Customer
+            → prescriptions belonging to
+              their CustomerDB profile
+    """
+
+    # -----------------------------------------------------
+    # Admin
+    # -----------------------------------------------------
+
+    if current_user.role == "admin":
+        return
+
+    # -----------------------------------------------------
+    # Pharmacist
+    # -----------------------------------------------------
+
+    if current_user.role == "pharmacist":
+        if (
+            not current_user.organization_id
+            or prescription.organization_id
+            != current_user.organization_id
+        ):
+            raise HTTPException(
+                status_code=404,
+                detail="Prescription not found",
+            )
+
+        return
+
+    # -----------------------------------------------------
+    # Customer
+    # -----------------------------------------------------
+
+    if current_user.role == "customer":
+        customer = (
+            db.query(CustomerDB)
+            .filter(
+                CustomerDB.user_id
+                == current_user.id
+            )
+            .first()
+        )
+
+        if (
+            not customer
+            or prescription.customer_id
+            != customer.id
+        ):
+            raise HTTPException(
+                status_code=404,
+                detail="Prescription not found",
+            )
+
+        return
+
+    # -----------------------------------------------------
+    # Unknown role
+    # -----------------------------------------------------
+
+    raise HTTPException(
+        status_code=403,
+        detail="Unsupported user role",
+    )
