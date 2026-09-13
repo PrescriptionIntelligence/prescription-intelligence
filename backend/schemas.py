@@ -1,7 +1,7 @@
 from pydantic import BaseModel, Field, field_validator
 from typing import Any, Optional
 from uuid import UUID
-from datetime import datetime
+from datetime import date, datetime
 
 
 class DoseComponent(BaseModel):
@@ -317,3 +317,42 @@ class CustomerProfileResponse(BaseModel):
     model_config = {
         "from_attributes": True
     }
+
+class CustomerCreateRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=200)
+    phone: Optional[str] = Field(default=None, max_length=30)
+    email: Optional[str] = Field(default=None, max_length=320)
+    date_of_birth: Optional[date] = None
+    address: Optional[str] = Field(default=None, max_length=1000)
+    notes: Optional[str] = Field(default=None, max_length=5000)
+
+
+class CustomerResponse(BaseModel):
+    id: UUID
+    customer_code: str
+    name: str
+    phone: Optional[str] = None
+    email: Optional[str] = None
+    date_of_birth: Optional[date] = None
+    address: Optional[str] = None
+    notes: Optional[str] = None
+    is_active: bool
+    organization_id: UUID
+    created_at: datetime
+    updated_at: datetime
+
+    model_config = {"from_attributes": True}
+
+class CustomerSearchResponse(BaseModel):
+    id: UUID
+    customer_code: str
+    name: str
+    phone: Optional[str] = None
+    email: Optional[str] = None
+    is_active: bool
+    organization_id: UUID
+
+    model_config = {"from_attributes": True}
+
+class PrescriptionCustomerAssignRequest(BaseModel):
+    customer_id: UUID

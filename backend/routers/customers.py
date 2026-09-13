@@ -2,85 +2,120 @@ from __future__ import annotations
 
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.orm import Session, selectinload
 
 from backend.auth import (
     require_any_authenticated_user,
     require_pharmacy_staff,
 )
-from backend.services.customer_service import (
-    customer_belongs_to_organization,
-    get_customer_by_user,
-    get_customer_organizations,
-    get_or_create_customer_profile,
-)
 from backend.database import get_db
 from backend.models import (
     CustomerDB,
-    CustomerOrganizationDB,
-    OrganizationDB,
     PrescriptionDB,
     UserDB,
 )
-
-
-router = APIRouter(
-    prefix="/customers",
-    tags=["Customers"],
+from backend.schemas import (
+    CustomerCreateRequest,
+    CustomerResponse,
+    CustomerSearchResponse,
 )
+from backend.services.customer_service import (
+    customer_belongs_to_organization,
+    ensure_customer_organization_link,
+    generate_customer_code,
+    get_customer_by_user,
+    get_customer_organizations,
+)
+
+
+router = APIRouter(prefix="/customers", tags=["Customers"])
+
+
+# =========================================================
+# PHARMACY CUSTOMER CREATION
+# =========================================================
+
+@router.post(
+    "",
+    response_model=CustomerResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+def create_customer(
+    request: CustomerCreateRequest,
+    current_user: UserDB = Depends(require_pharmacy_staff),
+    db: Session = Depends(get_db),
+):
+    organization = current_user.organization
+
+    if organization is None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Pharmacy organization is required",
+        )
+
+    name = request.name.strip()
+
+    if not name:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Customer name cannot be empty",
+        )
+
+    customer = CustomerDB(
+        organization_id=organization.id,
+        customer_code=generate_customer_code(name, db),
+        name=name,
+        phone=request.phone.strip() if request.phone else None,
+        email=request.email.strip().lower() if request.email else None,
+        date_of_birth=request.date_of_birth,
+        address=request.address.strip() if request.address else None,
+        notes=request.notes.strip() if request.notes else None,
+        is_active=True,
+    )
+
+    db.add(customer)
+    db.flush()
+
+    # The original organization_id remains the customer's
+    # primary/legacy organization. The membership table is
+    # the source of truth for additional pharmacy links.
+    ensure_customer_organization_link(
+        customer=customer,
+        organization=organization,
+        db=db,
+    )
+
+    db.commit()
+    db.refresh(customer)
+
+    return customer
 
 
 # =========================================================
 # PHARMACY CUSTOMER LIST
 # =========================================================
 
-
 @router.get("")
 def list_customers(
     skip: int = Query(default=0, ge=0),
     limit: int = Query(default=20, ge=1, le=100),
-    current_user: UserDB = Depends(
-        require_pharmacy_staff
-    ),
+    current_user: UserDB = Depends(require_pharmacy_staff),
     db: Session = Depends(get_db),
 ):
-    """
-    List customers belonging to the pharmacist's pharmacy.
+    organization = current_user.organization
 
-    Admins can see all customers.
-    Pharmacists can only see customers linked to
-    their own organization.
-    """
-
-    if current_user.role == "admin":
-        query = db.query(CustomerDB)
-
-    else:
-        if not current_user.organization_id:
-            raise HTTPException(
-                status_code=403,
-                detail=(
-                    "Pharmacist is not associated "
-                    "with an organization"
-                ),
-            )
-
-        query = (
-            db.query(CustomerDB)
-            .join(
-                CustomerOrganizationDB,
-                CustomerOrganizationDB.customer_id
-                == CustomerDB.id,
-            )
-            .filter(
-                CustomerOrganizationDB.organization_id
-                == current_user.organization_id
-            )
+    if organization is None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Pharmacy organization is required",
         )
 
     customers = (
-        query
+        db.query(CustomerDB)
+        .filter(
+            CustomerDB.organization_id == organization.id,
+        )
         .order_by(CustomerDB.created_at.desc())
         .offset(skip)
         .limit(limit)
@@ -94,11 +129,7 @@ def list_customers(
             "name": customer.name,
             "phone": customer.phone,
             "email": customer.email,
-            "date_of_birth": (
-                customer.date_of_birth
-                if customer.date_of_birth
-                else None
-            ),
+            "date_of_birth": customer.date_of_birth,
             "address": customer.address,
             "notes": customer.notes,
             "is_active": customer.is_active,
@@ -110,39 +141,75 @@ def list_customers(
 
 
 # =========================================================
+# PHARMACY CUSTOMER SEARCH
+# =========================================================
+
+@router.get(
+    "/search",
+    response_model=list[CustomerSearchResponse],
+)
+def search_customers(
+    q: str = Query(min_length=1, max_length=100),
+    current_user: UserDB = Depends(require_pharmacy_staff),
+    db: Session = Depends(get_db),
+):
+    organization = current_user.organization
+
+    if organization is None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Pharmacy organization is required",
+        )
+
+    search_term = q.strip()
+
+    if not search_term:
+        return []
+
+    pattern = f"%{search_term}%"
+
+    customers = (
+        db.query(CustomerDB)
+        .filter(
+            CustomerDB.organization_id == organization.id,
+            CustomerDB.is_active.is_(True),
+        )
+        .filter(
+            (CustomerDB.name.ilike(pattern))
+            | (CustomerDB.customer_code.ilike(pattern))
+            | (CustomerDB.phone.ilike(pattern))
+            | (CustomerDB.email.ilike(pattern))
+        )
+        .order_by(CustomerDB.name.asc())
+        .limit(20)
+        .all()
+    )
+
+    return customers
+
+
+# =========================================================
 # CURRENT CUSTOMER PROFILE
 # =========================================================
 
-
 @router.get("/me")
 def get_my_customer_profile(
-    current_user: UserDB = Depends(
-        require_any_authenticated_user
-    ),
+    current_user: UserDB = Depends(require_any_authenticated_user),
     db: Session = Depends(get_db),
 ):
-    """
-    Return the authenticated customer's profile.
-
-    Only users with role=customer can access this endpoint.
-    """
-
     if current_user.role != "customer":
         raise HTTPException(
-            status_code=403,
-            detail="Customer access required",
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Customer account required",
         )
 
-    customer = get_customer_by_user(
-        current_user.id,
-        db,
-    )
+    customer = get_customer_by_user(current_user.id, db)
 
-    if not customer:
-        raise HTTPException(
-            status_code=404,
-            detail="Customer profile not found",
-        )
+    if customer is None:
+        return {
+            "profile_linked": False,
+            "customer": None,
+        }
 
     organizations = get_customer_organizations(
         customer.id,
@@ -150,17 +217,20 @@ def get_my_customer_profile(
     )
 
     return {
-        "id": str(customer.id),
-        "customer_code": customer.customer_code,
-        "name": customer.name,
-        "phone": customer.phone,
-        "email": customer.email,
-        "date_of_birth": customer.date_of_birth,
-        "address": customer.address,
-        "notes": customer.notes,
-        "is_active": customer.is_active,
-        "created_at": customer.created_at,
-        "updated_at": customer.updated_at,
+        "profile_linked": True,
+        "customer": {
+            "id": str(customer.id),
+            "customer_code": customer.customer_code,
+            "name": customer.name,
+            "phone": customer.phone,
+            "email": customer.email,
+            "date_of_birth": customer.date_of_birth,
+            "address": customer.address,
+            "notes": customer.notes,
+            "is_active": customer.is_active,
+            "created_at": customer.created_at,
+            "updated_at": customer.updated_at,
+        },
         "pharmacies": [
             {
                 "id": str(organization.id),
@@ -176,34 +246,21 @@ def get_my_customer_profile(
 # CURRENT CUSTOMER PHARMACIES
 # =========================================================
 
-
 @router.get("/me/pharmacies")
 def get_my_pharmacies(
-    current_user: UserDB = Depends(
-        require_any_authenticated_user
-    ),
+    current_user: UserDB = Depends(require_any_authenticated_user),
     db: Session = Depends(get_db),
 ):
-    """
-    Return all pharmacies linked to the authenticated customer.
-    """
-
     if current_user.role != "customer":
         raise HTTPException(
-            status_code=403,
-            detail="Customer access required",
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Customer account required",
         )
 
-    customer = get_customer_by_user(
-        current_user.id,
-        db,
-    )
+    customer = get_customer_by_user(current_user.id, db)
 
-    if not customer:
-        raise HTTPException(
-            status_code=404,
-            detail="Customer profile not found",
-        )
+    if customer is None:
+        return []
 
     organizations = get_customer_organizations(
         customer.id,
@@ -221,28 +278,20 @@ def get_my_pharmacies(
 
 
 # =========================================================
-# CURRENT CUSTOMER PRESCRIPTIONS
+# CURRENT CUSTOMER PRESCRIPTION HISTORY
 # =========================================================
-
 
 @router.get("/me/prescriptions")
 def get_my_prescriptions(
     skip: int = Query(default=0, ge=0),
     limit: int = Query(default=20, ge=1, le=100),
-    current_user: UserDB = Depends(
-        require_any_authenticated_user
-    ),
+    current_user: UserDB = Depends(require_any_authenticated_user),
     db: Session = Depends(get_db),
 ):
-    """
-    Return all prescriptions belonging to the authenticated
-    customer's profile.
-    """
-
     if current_user.role != "customer":
         raise HTTPException(
-            status_code=403,
-            detail="Customer access required",
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Customer account required",
         )
 
     customer = get_customer_by_user(
@@ -250,7 +299,7 @@ def get_my_prescriptions(
         db,
     )
 
-    if not customer:
+    if customer is None:
         return []
 
     prescriptions = (
@@ -261,8 +310,7 @@ def get_my_prescriptions(
             )
         )
         .filter(
-            PrescriptionDB.customer_id
-            == customer.id
+            PrescriptionDB.customer_id == customer.id
         )
         .order_by(
             PrescriptionDB.created_at.desc()
@@ -276,60 +324,115 @@ def get_my_prescriptions(
 
 
 # =========================================================
-# PHARMACY CUSTOMER DETAIL
+# LINK CUSTOMER TO ANOTHER PHARMACY
 # =========================================================
 
+@router.post("/{customer_id}/link")
+def link_customer_to_pharmacy(
+    customer_id: UUID,
+    current_user: UserDB = Depends(require_pharmacy_staff),
+    db: Session = Depends(get_db),
+):
+    organization = current_user.organization
+
+    if organization is None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Pharmacy organization is required",
+        )
+
+    customer = (
+        db.query(CustomerDB)
+        .filter(CustomerDB.id == customer_id)
+        .first()
+    )
+
+    if customer is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Customer not found",
+        )
+
+    already_linked = customer_belongs_to_organization(
+        customer.id,
+        organization.id,
+        db,
+    )
+
+    if not already_linked:
+        ensure_customer_organization_link(
+            customer=customer,
+            organization=organization,
+            db=db,
+        )
+        db.commit()
+
+    return {
+        "message": (
+            "Customer is already linked to this pharmacy"
+            if already_linked
+            else "Customer linked to pharmacy successfully"
+        ),
+        "customer": {
+            "id": str(customer.id),
+            "customer_code": customer.customer_code,
+            "name": customer.name,
+        },
+        "pharmacy": {
+            "id": str(organization.id),
+            "name": organization.name,
+            "slug": organization.slug,
+        },
+        "already_linked": already_linked,
+    }
+
+
+# =========================================================
+# PHARMACY CUSTOMER DETAIL
+# =========================================================
 
 @router.get("/{customer_id}")
 def get_customer(
     customer_id: UUID,
-    current_user: UserDB = Depends(
-        require_pharmacy_staff
-    ),
+    current_user: UserDB = Depends(require_pharmacy_staff),
     db: Session = Depends(get_db),
 ):
-    """
-    Return one customer.
-
-    Pharmacists can only access customers linked to
-    their organization.
-
-    Admins can access any customer.
-    """
-
     customer = (
         db.query(CustomerDB)
-        .filter(
-            CustomerDB.id == customer_id
+        .options(
+            selectinload(
+                CustomerDB.organization_memberships
+            )
         )
+        .filter(CustomerDB.id == customer_id)
         .first()
     )
 
-    if not customer:
+    if customer is None:
         raise HTTPException(
-            status_code=404,
+            status_code=status.HTTP_404_NOT_FOUND,
             detail="Customer not found",
         )
 
-    if current_user.role != "admin":
-        if not current_user.organization_id:
-            raise HTTPException(
-                status_code=403,
-                detail=(
-                    "Pharmacist is not associated "
-                    "with an organization"
-                ),
-            )
+    organization = current_user.organization
 
-        if not customer_belongs_to_organization(
-            customer.id,
-            current_user.organization_id,
-            db,
-        ):
-            raise HTTPException(
-                status_code=404,
-                detail="Customer not found",
-            )
+    if organization is None:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Pharmacy organization is required",
+        )
+
+    # A pharmacist can only view a customer linked to
+    # their pharmacy.
+    if not customer_belongs_to_organization(
+        customer.id,
+        organization.id,
+        db,
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Customer not found",
+        )
 
     organizations = get_customer_organizations(
         customer.id,
@@ -339,8 +442,7 @@ def get_customer(
     prescription_count = (
         db.query(PrescriptionDB)
         .filter(
-            PrescriptionDB.customer_id
-            == customer.id
+            PrescriptionDB.customer_id == customer.id
         )
         .count()
     )
@@ -355,6 +457,7 @@ def get_customer(
         "address": customer.address,
         "notes": customer.notes,
         "is_active": customer.is_active,
+        "organization_id": str(customer.organization_id),
         "created_at": customer.created_at,
         "updated_at": customer.updated_at,
         "prescription_count": prescription_count,
@@ -373,41 +476,47 @@ def get_customer(
 # CUSTOMER PRESCRIPTION HISTORY FOR PHARMACY
 # =========================================================
 
-
 @router.get("/{customer_id}/prescriptions")
 def get_customer_prescriptions(
     customer_id: UUID,
     skip: int = Query(default=0, ge=0),
     limit: int = Query(default=20, ge=1, le=100),
-    current_user: UserDB = Depends(
-        require_pharmacy_staff
-    ),
+    current_user: UserDB = Depends(require_pharmacy_staff),
     db: Session = Depends(get_db),
 ):
-    """
-    Return prescriptions for a customer.
-
-    Pharmacists can only retrieve prescriptions belonging
-    to the customer AND their own pharmacy organization.
-
-    Admins can retrieve all prescriptions for the customer.
-    """
-
     customer = (
         db.query(CustomerDB)
-        .filter(
-            CustomerDB.id == customer_id
-        )
+        .filter(CustomerDB.id == customer_id)
         .first()
     )
 
-    if not customer:
+    if customer is None:
         raise HTTPException(
-            status_code=404,
+            status_code=status.HTTP_404_NOT_FOUND,
             detail="Customer not found",
         )
 
-    query = (
+    organization = current_user.organization
+
+    if organization is None:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Pharmacy organization is required",
+        )
+
+    # Membership is required before a pharmacist can
+    # access this customer's prescription history.
+    if not customer_belongs_to_organization(
+        customer.id,
+        organization.id,
+        db,
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Customer not found",
+        )
+
+    prescriptions = (
         db.query(PrescriptionDB)
         .options(
             selectinload(
@@ -415,38 +524,9 @@ def get_customer_prescriptions(
             )
         )
         .filter(
-            PrescriptionDB.customer_id
-            == customer.id
+            PrescriptionDB.customer_id == customer.id,
+            PrescriptionDB.organization_id == organization.id,
         )
-    )
-
-    if current_user.role != "admin":
-        if not current_user.organization_id:
-            raise HTTPException(
-                status_code=403,
-                detail=(
-                    "Pharmacist is not associated "
-                    "with an organization"
-                ),
-            )
-
-        if not customer_belongs_to_organization(
-            customer.id,
-            current_user.organization_id,
-            db,
-        ):
-            raise HTTPException(
-                status_code=404,
-                detail="Customer not found",
-            )
-
-        query = query.filter(
-            PrescriptionDB.organization_id
-            == current_user.organization_id
-        )
-
-    prescriptions = (
-        query
         .order_by(
             PrescriptionDB.created_at.desc()
         )

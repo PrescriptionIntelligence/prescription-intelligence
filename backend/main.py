@@ -48,6 +48,11 @@ from backend.schemas import (
     PrescriptionCreate,
     PrescriptionResponse,
     PrescriptionUploadResponse,
+    PrescriptionCustomerAssignRequest,
+)
+
+from backend.services.customer_service import (
+    customer_belongs_to_organization,
 )
 
 from backend.services.ocr_service import extract_text_from_image
@@ -96,6 +101,7 @@ app.include_router(auth.router)
 app.include_router(users.router)
 app.include_router(reviews.router)
 app.include_router(customers.router)
+
 
 # =========================================================
 # STATIC UPLOADS
@@ -1335,6 +1341,148 @@ def download_prescription_report(
             )
         },
     )
+
+
+# =========================================================
+# ASSIGN CUSTOMER TO PRESCRIPTION
+# =========================================================
+
+
+@app.patch(
+    "/prescriptions/{prescription_id}/customer",
+    tags=["Prescriptions"],
+)
+def assign_prescription_customer(
+    prescription_id: str,
+    request: PrescriptionCustomerAssignRequest,
+    current_user: UserDB = Depends(
+        require_pharmacy_staff
+    ),
+    db: Session = Depends(get_db),
+):
+    """
+    Assign an existing customer to a prescription.
+
+    Only pharmacy staff can perform this operation.
+
+    The prescription and customer must both belong
+    to the pharmacist's organization.
+
+    Admin users can assign customers across organizations.
+    """
+
+    # -----------------------------------------------------
+    # Find prescription
+    # -----------------------------------------------------
+
+    prescription = (
+        db.query(PrescriptionDB)
+        .filter(
+            PrescriptionDB.prescription_id
+            == prescription_id
+        )
+        .first()
+    )
+
+    if not prescription:
+        raise HTTPException(
+            status_code=404,
+            detail="Prescription not found",
+        )
+
+    # -----------------------------------------------------
+    # Determine pharmacist organization
+    # -----------------------------------------------------
+
+    organization = current_user.organization
+
+    if (
+        current_user.role != "admin"
+        and organization is None
+    ):
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                "Pharmacy organization is required"
+            ),
+        )
+
+    # -----------------------------------------------------
+    # Prescription organization access
+    # -----------------------------------------------------
+
+    if current_user.role != "admin":
+        if (
+            prescription.organization_id
+            != organization.id
+        ):
+            raise HTTPException(
+                status_code=404,
+                detail="Prescription not found",
+            )
+
+    # -----------------------------------------------------
+    # Find customer
+    # -----------------------------------------------------
+
+    customer = (
+        db.query(CustomerDB)
+        .filter(
+            CustomerDB.id
+            == request.customer_id
+        )
+        .first()
+    )
+
+    if not customer:
+        raise HTTPException(
+            status_code=404,
+            detail="Customer not found",
+        )
+
+    # -----------------------------------------------------
+    # Customer organization access
+    # -----------------------------------------------------
+
+    if current_user.role != "admin":
+        if not customer_belongs_to_organization(
+            customer.id,
+            organization.id,
+            db,
+        ):
+            raise HTTPException(
+                status_code=403,
+                detail=(
+                    "Customer is not linked "
+                    "to this pharmacy"
+                ),
+            )
+
+    # -----------------------------------------------------
+    # Assign customer
+    # -----------------------------------------------------
+
+    prescription.customer_id = customer.id
+
+    db.commit()
+    db.refresh(prescription)
+
+    return {
+        "message": (
+            "Customer assigned to prescription "
+            "successfully"
+        ),
+        "prescription_id": (
+            prescription.prescription_id
+        ),
+        "customer": {
+            "id": str(customer.id),
+            "customer_code": (
+                customer.customer_code
+            ),
+            "name": customer.name,
+        },
+    }
 
 
 # =========================================================
