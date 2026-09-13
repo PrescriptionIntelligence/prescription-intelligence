@@ -47,6 +47,9 @@ type SafetyFlag = {
   daily_dose?: number;
   daily_dose_unit?: string;
   limit?: number;
+  prescription_strength?: string | null;
+  reference_strength?: string | null;
+  resolution_reason?: string | null;
 };
 
 type Prescription = {
@@ -1963,119 +1966,265 @@ function OcrFlagCard({
 function SafetyFlagCard({ flag }: { flag: SafetyFlag }) {
   const severity = severityStyle(flag.severity);
 
+  const normalizedSeverity = flag.severity.toLowerCase();
+
   const isHigh =
-    flag.severity.toLowerCase() === "high" ||
-    flag.severity.toLowerCase() === "error";
+    normalizedSeverity === "high" ||
+    normalizedSeverity === "error";
+
+  const isStrengthConflict =
+    flag.type === "strength_conflict";
 
   const isInteraction =
-    flag.type === "drug_interaction" || !!flag.interaction_id;
+    flag.type === "drug_interaction" ||
+    !!flag.interaction_id;
 
   return (
     <article
-      className={`rounded-2xl border bg-white p-5 shadow-sm ${
-        isHigh
-          ? "border-red-200"
-          : flag.severity.toLowerCase() === "warning"
-            ? "border-amber-200"
-            : "border-slate-200"
+      className={`overflow-hidden rounded-2xl border bg-white shadow-sm ${
+        isStrengthConflict
+          ? "border-[#E7CACA]"
+          : isHigh
+          ? "border-[#E7CACA]"
+          : normalizedSeverity === "warning"
+          ? "border-[#E5D4A8]"
+          : "border-[#DFE6E1]"
       }`}
     >
-      {/* Header */}
-      <div className="flex items-start gap-3">
-        <div
-          className={`flex h-10 w-10 shrink-0 items-center justify-center rounded-xl text-sm font-bold ${severity.iconBackground}`}
-        >
-          {isHigh
-            ? "!"
-            : flag.severity.toLowerCase() === "warning"
+      {/* =====================================================
+          Header
+      ===================================================== */}
+
+      <div
+        className={`border-l-4 px-5 py-5 ${
+          isStrengthConflict
+            ? "border-[#A74646]"
+            : isHigh
+            ? "border-[#A74646]"
+            : normalizedSeverity === "warning"
+            ? "border-[#A47B2C]"
+            : "border-[#8A9891]"
+        }`}
+      >
+        <div className="flex items-start gap-3">
+          {/* Finding icon */}
+
+          <div
+            className={`flex h-10 w-10 shrink-0 items-center justify-center rounded-xl border text-sm font-bold ${
+              isStrengthConflict
+                ? "border-[#E7CACA] bg-[#FFF0F0] text-[#A74646]"
+                : severity.iconBackground
+            }`}
+          >
+            {isHigh
+              ? "!"
+              : normalizedSeverity === "warning"
               ? "!"
               : "i"}
-        </div>
-
-        <div className="min-w-0 flex-1">
-          <div className="flex flex-wrap items-center gap-2">
-            <span
-              className={`rounded-full px-2.5 py-1 text-[11px] font-semibold uppercase tracking-wide ${severity.badge}`}
-            >
-              {flag.severity}
-            </span>
-
-            {isInteraction && (
-              <span className="rounded-full bg-slate-100 px-2.5 py-1 text-[11px] font-medium text-slate-600">
-                Drug interaction
-              </span>
-            )}
           </div>
 
-          <h3 className="mt-3 text-[15px] font-semibold leading-6 text-slate-950">
-            {flag.message}
-          </h3>
+          <div className="min-w-0 flex-1">
+            {/* Finding badges */}
 
-          {flag.medicine && (
-            <p className="mt-1.5 text-xs text-slate-500">
-              Medicine:{" "}
-              <span className="font-medium text-slate-700">
-                {flag.medicine}
+            <div className="flex flex-wrap items-center gap-2">
+              <span
+                className={`rounded-full px-2.5 py-1 text-[10px] font-semibold uppercase tracking-[0.08em] ${
+                  isStrengthConflict
+                    ? "border border-[#E7CACA] bg-[#FFF0F0] text-[#A74646]"
+                    : severity.badge
+                }`}
+              >
+                {isStrengthConflict
+                  ? "High priority"
+                  : severity.label}
               </span>
-            </p>
-          )}
+
+              {isStrengthConflict && (
+                <span className="rounded-full border border-[#E7CACA] bg-white px-2.5 py-1 text-[10px] font-semibold uppercase tracking-[0.08em] text-[#A74646]">
+                  Strength conflict
+                </span>
+              )}
+
+              {isInteraction &&
+                !isStrengthConflict && (
+                  <span className="rounded-full border border-[#DFE6E1] bg-[#FAFCFB] px-2.5 py-1 text-[10px] font-medium text-[#526158]">
+                    Drug interaction
+                  </span>
+                )}
+            </div>
+
+            {/* Finding title */}
+
+            <h3 className="mt-3 text-[15px] font-semibold leading-6 tracking-[-0.01em] text-[#17211D]">
+              {flag.message}
+            </h3>
+
+            {/* Medicine */}
+
+            {flag.medicine && (
+              <p className="mt-1.5 text-xs text-[#7C8881]">
+                Medicine:{" "}
+                <span className="font-medium text-[#526158]">
+                  {flag.medicine}
+                </span>
+              </p>
+            )}
+          </div>
         </div>
       </div>
 
-      {/* Interaction details */}
-      {isInteraction && flag.matched_drugs?.length ? (
-        <div className="mt-5 rounded-xl border border-red-100 bg-red-50/40 p-4">
-          <div className="flex items-center gap-2">
-            <span className="h-1.5 w-1.5 rounded-full bg-red-500" />
+      {/* =====================================================
+          Strength conflict — primary clinical comparison
+      ===================================================== */}
 
-            <p className="text-[10px] font-semibold uppercase tracking-[0.12em] text-red-700">
-              Matched medicines
+      {isStrengthConflict && (
+        <div className="border-t border-[#E7CACA] bg-[#FFF8F8] px-5 py-5">
+          <div className="flex items-center gap-2">
+            <span className="h-1.5 w-1.5 rounded-full bg-[#A74646]" />
+
+            <p className="text-[10px] font-bold uppercase tracking-[0.14em] text-[#A74646]">
+              Strength verification required
             </p>
           </div>
 
-          <div className="mt-3 flex flex-wrap items-center gap-2">
-            {flag.matched_drugs.map((drug, index) => (
-              <div
-                key={`${drug}-${index}`}
-                className="flex items-center gap-2"
-              >
-                <span className="rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs font-semibold text-slate-800 shadow-sm">
-                  {drug}
-                </span>
+          <p className="mt-2 max-w-2xl text-xs leading-5 text-[#8F4A4A]">
+            The prescribed strength does not match the strength
+            associated with the resolved medicine reference.
+          </p>
 
-                {index < (flag.matched_drugs?.length ?? 0) - 1 && (
-                  <span className="text-xs font-bold text-red-400">
-                    +
-                  </span>
-                )}
+          {/* Strength comparison */}
+
+          <div className="mt-4 grid gap-px overflow-hidden rounded-xl border border-[#E7CACA] bg-[#E7CACA] sm:grid-cols-2">
+            <div className="bg-white px-4 py-4">
+              <p className="text-[9px] font-bold uppercase tracking-[0.12em] text-[#9AA39E]">
+                Prescription strength
+              </p>
+
+              <div className="mt-2 flex items-baseline gap-2">
+                <p className="text-2xl font-semibold tracking-[-0.03em] text-[#17211D]">
+                  {flag.prescription_strength ||
+                    "Not available"}
+                </p>
+
+                <span className="text-[10px] font-medium uppercase tracking-wide text-[#A74646]">
+                  Prescribed
+                </span>
               </div>
-            ))}
+            </div>
+
+            <div className="bg-white px-4 py-4">
+              <p className="text-[9px] font-bold uppercase tracking-[0.12em] text-[#9AA39E]">
+                Reference strength
+              </p>
+
+              <div className="mt-2 flex items-baseline gap-2">
+                <p className="text-2xl font-semibold tracking-[-0.03em] text-[#17211D]">
+                  {flag.reference_strength ||
+                    "Not available"}
+                </p>
+
+                <span className="text-[10px] font-medium uppercase tracking-wide text-[#526158]">
+                  Resolved reference
+                </span>
+              </div>
+            </div>
+          </div>
+
+          {/* Clinical action */}
+
+          <div className="mt-4 rounded-xl border border-[#E7CACA] bg-[#FFF0F0] px-4 py-4">
+            <div className="flex items-start gap-3">
+              <div className="mt-0.5 grid h-7 w-7 shrink-0 place-items-center rounded-full bg-[#F8DEDE] text-[#A74646]">
+                <span className="text-xs font-bold">
+                  !
+                </span>
+              </div>
+
+              <div>
+                <p className="text-[11px] font-bold text-[#8F3D3D]">
+                  Do not rely on the extracted strength
+                </p>
+
+                <p className="mt-1 text-xs leading-5 text-[#A74646]">
+                  Confirm the prescribed strength against the
+                  original prescription before dispensing or
+                  clinical use.
+                </p>
+              </div>
+            </div>
           </div>
         </div>
-      ) : null}
+      )}
 
-      {/* Clinical metadata */}
-      {(flag.interaction_category || flag.evidence_source) && (
-        <div className="mt-5 grid gap-3 sm:grid-cols-2">
+      {/* =====================================================
+          Interaction details
+      ===================================================== */}
+
+      {isInteraction &&
+        flag.matched_drugs?.length &&
+        !isStrengthConflict && (
+          <div className="mx-5 mt-5 rounded-xl border border-[#E7CACA] bg-[#FFF0F0] p-4">
+            <div className="flex items-center gap-2">
+              <span className="h-1.5 w-1.5 rounded-full bg-[#A74646]" />
+
+              <p className="text-[10px] font-semibold uppercase tracking-[0.12em] text-[#A74646]">
+                Matched medicines
+              </p>
+            </div>
+
+            <div className="mt-3 flex flex-wrap items-center gap-2">
+              {flag.matched_drugs.map(
+                (drug, index) => (
+                  <div
+                    key={`${drug}-${index}`}
+                    className="flex items-center gap-2"
+                  >
+                    <span className="rounded-lg border border-[#DFE6E1] bg-white px-3 py-2 text-xs font-semibold text-[#526158] shadow-sm">
+                      {drug}
+                    </span>
+
+                    {index <
+                      flag.matched_drugs!.length -
+                        1 && (
+                      <span className="text-xs font-bold text-[#A74646]">
+                        +
+                      </span>
+                    )}
+                  </div>
+                )
+              )}
+            </div>
+          </div>
+        )}
+
+      {/* =====================================================
+          Clinical metadata
+      ===================================================== */}
+
+      {(flag.interaction_category ||
+        flag.evidence_source) && (
+        <div className="mx-5 mt-5 grid gap-3 sm:grid-cols-2">
           {flag.interaction_category && (
-            <div className="rounded-xl border border-slate-100 bg-slate-50 p-4">
-              <p className="text-[10px] font-semibold uppercase tracking-[0.12em] text-slate-400">
+            <div className="rounded-xl border border-[#DFE6E1] bg-[#FAFCFB] p-4">
+              <p className="text-[10px] font-semibold uppercase tracking-[0.12em] text-[#9AA39E]">
                 Risk category
               </p>
 
-              <p className="mt-2 text-sm font-semibold text-slate-800">
-                {formatInteractionCategory(flag.interaction_category)}
+              <p className="mt-2 text-sm font-semibold text-[#526158]">
+                {formatInteractionCategory(
+                  flag.interaction_category
+                )}
               </p>
             </div>
           )}
 
           {flag.evidence_source && (
-            <div className="rounded-xl border border-slate-100 bg-slate-50 p-4">
-              <p className="text-[10px] font-semibold uppercase tracking-[0.12em] text-slate-400">
+            <div className="rounded-xl border border-[#DFE6E1] bg-[#FAFCFB] p-4">
+              <p className="text-[10px] font-semibold uppercase tracking-[0.12em] text-[#9AA39E]">
                 Evidence
               </p>
 
-              <p className="mt-2 text-sm font-semibold text-slate-800">
+              <p className="mt-2 text-sm font-semibold text-[#526158]">
                 {flag.evidence_source}
               </p>
             </div>
@@ -2083,36 +2232,43 @@ function SafetyFlagCard({ flag }: { flag: SafetyFlag }) {
         </div>
       )}
 
-      {/* Recommended action */}
+      {/* =====================================================
+          Recommended action
+      ===================================================== */}
+
       {flag.review_action && (
         <div
-          className={`mt-5 rounded-xl border px-4 py-4 ${
+          className={`mx-5 mt-5 rounded-xl border px-4 py-4 ${
             isHigh
-              ? "border-red-200 bg-red-50"
-              : "border-amber-200 bg-amber-50"
+              ? "border-[#E7CACA] bg-[#FFF0F0]"
+              : "border-[#E5D4A8] bg-[#FFF7DF]"
           }`}
         >
           <div className="flex items-start gap-3">
             <div
               className={`mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-full ${
                 isHigh
-                  ? "bg-red-100 text-red-700"
-                  : "bg-amber-100 text-amber-700"
+                  ? "bg-[#F8DEDE] text-[#A74646]"
+                  : "bg-[#F8EDC8] text-[#A47B2C]"
               }`}
             >
-              <span className="text-xs font-bold">!</span>
+              <span className="text-xs font-bold">
+                !
+              </span>
             </div>
 
             <div className="min-w-0">
               <p
                 className={`text-[10px] font-semibold uppercase tracking-[0.12em] ${
-                  isHigh ? "text-red-700" : "text-amber-700"
+                  isHigh
+                    ? "text-[#A74646]"
+                    : "text-[#A47B2C]"
                 }`}
               >
                 Recommended action
               </p>
 
-              <p className="mt-1.5 text-sm font-semibold leading-6 text-slate-800">
+              <p className="mt-1.5 text-sm font-semibold leading-6 text-[#526158]">
                 {flag.review_action}
               </p>
             </div>
@@ -2120,27 +2276,56 @@ function SafetyFlagCard({ flag }: { flag: SafetyFlag }) {
         </div>
       )}
 
-      {/* Reference */}
+      {/* =====================================================
+          Resolution metadata
+      ===================================================== */}
+
+      {isStrengthConflict &&
+        flag.resolution_reason && (
+          <div className="mx-5 mt-5 rounded-xl border border-[#DFE6E1] bg-[#FAFCFB] px-4 py-3">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <span className="text-[10px] font-semibold uppercase tracking-[0.12em] text-[#9AA39E]">
+                Resolution
+              </span>
+
+              <code className="rounded-md bg-white px-2 py-1 text-[10px] font-medium text-[#7C8881]">
+                {flag.resolution_reason}
+              </code>
+            </div>
+          </div>
+        )}
+
+      {/* =====================================================
+          Reference
+      ===================================================== */}
+
       {flag.interaction_id && (
-        <div className="mt-5 flex flex-col gap-2 border-t border-slate-100 pt-4 sm:flex-row sm:items-center sm:justify-between">
+        <div className="mx-5 mt-5 flex flex-col gap-2 border-t border-[#DFE6E1] py-4 sm:flex-row sm:items-center sm:justify-between">
           <div className="flex flex-wrap items-center gap-2">
-            <span className="text-[10px] font-semibold uppercase tracking-[0.12em] text-slate-400">
+            <span className="text-[10px] font-semibold uppercase tracking-[0.12em] text-[#9AA39E]">
               Reference
             </span>
 
-            <code className="rounded-md bg-slate-50 px-2 py-1 text-[10px] font-medium text-slate-500">
+            <code className="rounded-md bg-[#FAFCFB] px-2 py-1 text-[10px] font-medium text-[#7C8881]">
               {flag.interaction_id}
             </code>
           </div>
 
-          <span className="text-[11px] font-medium text-slate-400">
+          <span className="text-[11px] font-medium text-[#9AA39E]">
             Clinical review required
           </span>
         </div>
       )}
+
+      {/* Bottom spacing when there is no reference */}
+
+      {!flag.interaction_id && (
+        <div className="h-1" />
+      )}
     </article>
   );
 }
+
 // =========================================================
 // Empty state
 // =========================================================

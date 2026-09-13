@@ -488,15 +488,18 @@ def _merge_safety_flags(
 
             # Preserve structured safety metadata.
             for field in (
-                "matched_drugs",
-                "interaction_id",
-                "interaction_category",
-                "review_action",
-                "evidence_source",
-                "daily_dose",
-                "daily_dose_unit",
-                "limit",
-            ):
+    "matched_drugs",
+    "interaction_id",
+    "interaction_category",
+    "review_action",
+    "evidence_source",
+    "daily_dose",
+    "daily_dose_unit",
+    "limit",
+    "prescription_strength",
+    "reference_strength",
+    "resolution_reason",
+):
 
                 if field in issue:
                     flag[field] = issue[field]
@@ -552,15 +555,18 @@ def _merge_safety_flags(
         }
 
         for field in (
-            "matched_drugs",
-            "interaction_id",
-            "interaction_category",
-            "review_action",
-            "evidence_source",
-            "daily_dose",
-            "daily_dose_unit",
-            "limit",
-        ):
+    "matched_drugs",
+    "interaction_id",
+    "interaction_category",
+    "review_action",
+    "evidence_source",
+    "daily_dose",
+    "daily_dose_unit",
+    "limit",
+    "prescription_strength",
+    "reference_strength",
+    "resolution_reason",
+):
 
             if field in issue:
                 flag[field] = issue[field]
@@ -779,15 +785,18 @@ def _reconcile_safety_analysis(
         }
 
         for field in (
-            "matched_drugs",
-            "interaction_id",
-            "interaction_category",
-            "review_action",
-            "evidence_source",
-            "daily_dose",
-            "daily_dose_unit",
-            "limit",
-        ):
+    "matched_drugs",
+    "interaction_id",
+    "interaction_category",
+    "review_action",
+    "evidence_source",
+    "daily_dose",
+    "daily_dose_unit",
+    "limit",
+    "prescription_strength",
+    "reference_strength",
+    "resolution_reason",
+):
 
             if field in flag:
                 issue[field] = flag[field]
