@@ -787,7 +787,7 @@ from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
 from backend.database import Base, get_db
-from backend.models import UserDB, OrganizationDB
+from backend.models import UserDB, OrganizationDB, PrescriptionDB, ReviewAuditDB
 from backend.security import hash_password
 from backend.routers.auth import _authenticate
 
@@ -851,6 +851,7 @@ def active_user(auth_db_session):
         password_hash=hash_password("correct-password"),
         role="pharmacist",
         is_active=True,
+        email_verified=True,
     )
     auth_db_session.add(user)
     auth_db_session.commit()
@@ -990,6 +991,7 @@ def token_test_user(auth_db_session):
         password_hash=hash_password("token-password-99"),
         role="pharmacist",
         is_active=True,
+        email_verified=True,
     )
     auth_db_session.add(user)
     auth_db_session.commit()
@@ -1244,3 +1246,612 @@ def test_genuine_medicine_review_still_reports_ambiguity():
         "ambiguous_medicine" in flag_types
         or "ocr_extraction_failed" in flag_types
     )
+
+# ---------------------------------------------------------------------------
+# Prescription review workflow tests
+# ---------------------------------------------------------------------------
+
+
+def _get_pharmacist_token(client, email: str, password: str) -> str:
+    response = client.post(
+        "/auth/token",
+        data={
+            "username": email,
+            "password": password,
+        },
+    )
+
+    assert response.status_code == 200
+    return response.json()["access_token"]
+
+@pytest.fixture
+def review_prescription(auth_db_session, token_test_user):
+    prescription_id = "RX-REVIEW-TEST-001"
+
+    prescription = (
+        auth_db_session.query(PrescriptionDB)
+        .filter(
+            PrescriptionDB.prescription_id == prescription_id
+        )
+        .first()
+    )
+
+    if prescription is None:
+        prescription = PrescriptionDB(
+            prescription_id=prescription_id,
+            organization_id=token_test_user.organization_id,
+            uploaded_by_id=token_test_user.id,
+            status="analyzed",
+        )
+        auth_db_session.add(prescription)
+        auth_db_session.flush()
+
+    # Remove review history from previous tests so every
+    # review test starts with a clean audit trail.
+    auth_db_session.query(ReviewAuditDB).filter(
+        ReviewAuditDB.prescription_id == prescription.id
+    ).delete(synchronize_session=False)
+
+    # Reset the review state before every test.
+    prescription.organization_id = token_test_user.organization_id
+    prescription.uploaded_by_id = token_test_user.id
+    prescription.status = "analyzed"
+    prescription.review_status = "pending"
+    prescription.reviewed_by_id = None
+    prescription.reviewed_at = None
+    prescription.review_notes = None
+    prescription.safety_flags = [
+        {
+            "type": "strength_conflict",
+            "severity": "high",
+            "message": (
+                "Prescription strength conflicts with "
+                "the resolved medicine reference."
+            ),
+            "prescription_strength": 10.0,
+            "reference_strength": 5.0,
+        },
+        {
+            "type": "drug_interaction",
+            "severity": "high",
+            "message": "Potential drug interaction detected.",
+        },
+        {
+            "type": "dose_check",
+            "severity": "low",
+            "message": "Dose should be verified.",
+        },
+    ]
+
+    auth_db_session.commit()
+    auth_db_session.refresh(prescription)
+
+    return prescription
+
+def test_get_review_status(
+    test_app,
+    review_prescription,
+):
+    client = test_app
+
+    token = _get_pharmacist_token(
+        client,
+        "token@example.com",
+        "token-password-99",
+    )
+
+    response = client.get(
+        f"/prescriptions/{review_prescription.prescription_id}/review",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+    assert response.status_code == 200
+
+    data = response.json()
+
+    assert data["prescription_id"] == "RX-REVIEW-TEST-001"
+    assert data["review_status"] == "pending"
+    assert data["high_priority_findings"] == 2
+    assert data["total_findings"] == 3
+    assert data["reviewed_by_id"] is None
+    assert data["reviewed_at"] is None
+
+
+def test_start_review_changes_status(
+    test_app,
+    review_prescription,
+):
+    client = test_app
+
+    token = _get_pharmacist_token(
+        client,
+        "token@example.com",
+        "token-password-99",
+    )
+
+    response = client.post(
+        f"/prescriptions/{review_prescription.prescription_id}/review",
+        headers={"Authorization": f"Bearer {token}"},
+        json={
+            "action": "start_review",
+        },
+    )
+
+    assert response.status_code == 200
+
+    data = response.json()
+
+    assert data["review_status"] == "under_review"
+    assert data["reviewed_by_id"] is None
+    assert data["reviewed_at"] is None
+
+
+def test_confirm_creates_review_audit(
+    test_app,
+    review_prescription,
+):
+    client = test_app
+
+    token = _get_pharmacist_token(
+        client,
+        "token@example.com",
+        "token-password-99",
+    )
+
+    response = client.post(
+        f"/prescriptions/{review_prescription.prescription_id}/review",
+        headers={"Authorization": f"Bearer {token}"},
+        json={
+            "action": "confirm",
+            "finding": {
+                "finding_type": "strength_conflict",
+                "finding_index": 0,
+                "finding_data": {
+                    "prescription_strength": 10.0,
+                    "reference_strength": 5.0,
+                },
+            },
+            "note": "Confirmed against the original prescription.",
+        },
+    )
+
+    assert response.status_code == 200
+
+    data = response.json()
+
+    assert data["review_status"] == "under_review"
+    assert data["reviewed_by_id"] is not None
+    assert data["reviewed_at"] is not None
+    assert data["review_notes"] == (
+        "Confirmed against the original prescription."
+    )
+
+    history_response = client.get(
+        f"/prescriptions/{review_prescription.prescription_id}/review/history",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+    assert history_response.status_code == 200
+
+    history = history_response.json()
+
+    assert history["current_status"] == "under_review"
+    assert len(history["audits"]) == 1
+
+    audit = history["audits"][0]
+
+    assert audit["action"] == "confirm"
+    assert audit["previous_status"] == "pending"
+    assert audit["new_status"] == "under_review"
+    assert audit["finding_type"] == "strength_conflict"
+    assert audit["finding_data"]["finding_index"] == 0
+    assert audit["finding_data"]["prescription_strength"] == 10.0
+    assert audit["finding_data"]["reference_strength"] == 5.0
+    assert audit["note"] == (
+        "Confirmed against the original prescription."
+    )
+
+
+def test_clarify_changes_status(
+    test_app,
+    review_prescription,
+):
+    client = test_app
+
+    token = _get_pharmacist_token(
+        client,
+        "token@example.com",
+        "token-password-99",
+    )
+
+    response = client.post(
+        f"/prescriptions/{review_prescription.prescription_id}/review",
+        headers={"Authorization": f"Bearer {token}"},
+        json={
+            "action": "clarify",
+            "finding": {
+                "finding_type": "strength_conflict",
+                "finding_index": 0,
+                "finding_data": {},
+            },
+            "note": "Please clarify the prescribed strength.",
+        },
+    )
+
+    assert response.status_code == 200
+
+    data = response.json()
+
+    assert data["review_status"] == "needs_clarification"
+    assert data["reviewed_by_id"] is not None
+    assert data["reviewed_at"] is not None
+    assert data["review_notes"] == (
+        "Please clarify the prescribed strength."
+    )
+
+
+def test_invalid_review_action_is_rejected(
+    test_app,
+    review_prescription,
+):
+    client = test_app
+
+    token = _get_pharmacist_token(
+        client,
+        "token@example.com",
+        "token-password-99",
+    )
+
+    response = client.post(
+        f"/prescriptions/{review_prescription.prescription_id}/review",
+        headers={"Authorization": f"Bearer {token}"},
+        json={
+            "action": "approve_everything",
+        },
+    )
+
+    assert response.status_code == 400
+
+    data = response.json()
+
+    assert "Invalid review action" in data["detail"]
+
+
+def test_missing_review_prescription_returns_404(test_app):
+    client = test_app
+
+    token = _get_pharmacist_token(
+        client,
+        "token@example.com",
+        "token-password-99",
+    )
+
+    response = client.get(
+        "/prescriptions/RX-DOES-NOT-EXIST/review",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+    assert response.status_code == 404
+    assert response.json()["detail"] == "Prescription not found"
+
+
+def test_review_requires_authentication(
+    test_app,
+    review_prescription,
+):
+    client = test_app
+
+    response = client.get(
+        f"/prescriptions/{review_prescription.prescription_id}/review",
+    )
+
+    assert response.status_code == 401
+
+
+def test_confirm_resolves_only_selected_finding(
+    test_app,
+    review_prescription,
+):
+    client = test_app
+
+    token = _get_pharmacist_token(
+        client,
+        "token@example.com",
+        "token-password-99",
+    )
+
+    response = client.post(
+        f"/prescriptions/{review_prescription.prescription_id}/review",
+        headers={"Authorization": f"Bearer {token}"},
+        json={
+            "action": "confirm",
+            "finding": {
+                "finding_type": "strength_conflict",
+                "finding_index": 0,
+                "finding_data": {
+                    "prescription_strength": 10.0,
+                    "reference_strength": 5.0,
+                },
+            },
+            "note": "Confirmed against the original prescription.",
+        },
+    )
+
+    assert response.status_code == 200
+
+    data = response.json()
+
+    # One high-priority finding remains unresolved:
+    # the drug interaction.
+    assert data["review_status"] == "under_review"
+    assert data["high_priority_findings"] == 1
+    assert data["total_findings"] == 3
+
+
+def test_confirm_all_high_priority_findings_verifies_prescription(
+    test_app,
+    review_prescription,
+):
+    client = test_app
+
+    token = _get_pharmacist_token(
+        client,
+        "token@example.com",
+        "token-password-99",
+    )
+
+    first_response = client.post(
+        f"/prescriptions/{review_prescription.prescription_id}/review",
+        headers={"Authorization": f"Bearer {token}"},
+        json={
+            "action": "confirm",
+            "finding": {
+                "finding_type": "strength_conflict",
+                "finding_index": 0,
+                "finding_data": {
+                    "prescription_strength": 10.0,
+                    "reference_strength": 5.0,
+                },
+            },
+        },
+    )
+
+    assert first_response.status_code == 200
+    assert first_response.json()["review_status"] == "under_review"
+    assert first_response.json()["high_priority_findings"] == 1
+
+    second_response = client.post(
+        f"/prescriptions/{review_prescription.prescription_id}/review",
+        headers={"Authorization": f"Bearer {token}"},
+        json={
+            "action": "confirm",
+            "finding": {
+                "finding_type": "drug_interaction",
+                "finding_index": 1,
+                "finding_data": {},
+            },
+            "note": "Interaction reviewed and clinically accepted.",
+        },
+    )
+
+    assert second_response.status_code == 200
+
+    data = second_response.json()
+
+    assert data["review_status"] == "verified"
+    assert data["high_priority_findings"] == 0
+    assert data["total_findings"] == 3
+
+def test_dismiss_low_priority_finding_keeps_prescription_verified(
+    test_app,
+    review_prescription,
+):
+    client = test_app
+
+    token = _get_pharmacist_token(
+        client,
+        "token@example.com",
+        "token-password-99",
+    )
+
+    # Resolve both high-priority findings first.
+    first_response = client.post(
+        f"/prescriptions/{review_prescription.prescription_id}/review",
+        headers={"Authorization": f"Bearer {token}"},
+        json={
+            "action": "confirm",
+            "finding": {
+                "finding_type": "strength_conflict",
+                "finding_index": 0,
+                "finding_data": {},
+            },
+        },
+    )
+
+    assert first_response.status_code == 200
+    assert first_response.json()["review_status"] == "under_review"
+
+    second_response = client.post(
+        f"/prescriptions/{review_prescription.prescription_id}/review",
+        headers={"Authorization": f"Bearer {token}"},
+        json={
+            "action": "confirm",
+            "finding": {
+                "finding_type": "drug_interaction",
+                "finding_index": 1,
+                "finding_data": {},
+            },
+        },
+    )
+
+    assert second_response.status_code == 200
+    assert second_response.json()["review_status"] == "verified"
+    assert second_response.json()["high_priority_findings"] == 0
+
+    # Dismissing a LOW-priority finding must not change a
+    # verified prescription to rejected.
+    third_response = client.post(
+        f"/prescriptions/{review_prescription.prescription_id}/review",
+        headers={"Authorization": f"Bearer {token}"},
+        json={
+            "action": "dismiss",
+            "finding": {
+                "finding_type": "dose_check",
+                "finding_index": 2,
+                "finding_data": {},
+            },
+            "note": "Low-priority dose finding reviewed and dismissed.",
+        },
+    )
+
+    assert third_response.status_code == 200
+
+    data = third_response.json()
+
+    assert data["review_status"] == "verified"
+    assert data["high_priority_findings"] == 0
+    assert data["total_findings"] == 3
+
+def test_dismiss_last_high_priority_finding_rejects_prescription(
+    test_app,
+    review_prescription,
+):
+    client = test_app
+
+    token = _get_pharmacist_token(
+        client,
+        "token@example.com",
+        "token-password-99",
+    )
+
+    # Confirm the first high-priority finding.
+    first_response = client.post(
+        f"/prescriptions/{review_prescription.prescription_id}/review",
+        headers={"Authorization": f"Bearer {token}"},
+        json={
+            "action": "confirm",
+            "finding": {
+                "finding_type": "strength_conflict",
+                "finding_index": 0,
+                "finding_data": {},
+            },
+        },
+    )
+
+    assert first_response.status_code == 200
+    assert first_response.json()["review_status"] == "under_review"
+    assert first_response.json()["high_priority_findings"] == 1
+
+    # Dismiss the LAST remaining high-priority finding.
+    second_response = client.post(
+        f"/prescriptions/{review_prescription.prescription_id}/review",
+        headers={"Authorization": f"Bearer {token}"},
+        json={
+            "action": "dismiss",
+            "finding": {
+                "finding_type": "drug_interaction",
+                "finding_index": 1,
+                "finding_data": {},
+            },
+            "note": "High-priority interaction reviewed and dismissed.",
+        },
+    )
+
+    assert second_response.status_code == 200
+
+    data = second_response.json()
+
+    assert data["review_status"] == "rejected"
+    assert data["high_priority_findings"] == 0
+    assert data["total_findings"] == 3
+
+def test_clarification_does_not_resolve_finding(
+    test_app,
+    review_prescription,
+):
+    client = test_app
+
+    token = _get_pharmacist_token(
+        client,
+        "token@example.com",
+        "token-password-99",
+    )
+
+    response = client.post(
+        f"/prescriptions/{review_prescription.prescription_id}/review",
+        headers={"Authorization": f"Bearer {token}"},
+        json={
+            "action": "clarify",
+            "finding": {
+                "finding_type": "strength_conflict",
+                "finding_index": 0,
+                "finding_data": {},
+            },
+            "note": "Please clarify the prescribed strength.",
+        },
+    )
+
+    assert response.status_code == 200
+
+    data = response.json()
+
+    assert data["review_status"] == "needs_clarification"
+    assert data["high_priority_findings"] == 2
+
+
+def test_review_rejects_mismatched_finding_type(
+    test_app,
+    review_prescription,
+):
+    client = test_app
+
+    token = _get_pharmacist_token(
+        client,
+        "token@example.com",
+        "token-password-99",
+    )
+
+    response = client.post(
+        f"/prescriptions/{review_prescription.prescription_id}/review",
+        headers={"Authorization": f"Bearer {token}"},
+        json={
+            "action": "confirm",
+            "finding": {
+                "finding_type": "drug_interaction",
+                "finding_index": 0,
+                "finding_data": {},
+            },
+        },
+    )
+
+    assert response.status_code == 400
+    assert "does not match" in response.json()["detail"].lower()
+
+
+def test_review_rejects_invalid_finding_index(
+    test_app,
+    review_prescription,
+):
+    client = test_app
+
+    token = _get_pharmacist_token(
+        client,
+        "token@example.com",
+        "token-password-99",
+    )
+
+    response = client.post(
+        f"/prescriptions/{review_prescription.prescription_id}/review",
+        headers={"Authorization": f"Bearer {token}"},
+        json={
+            "action": "confirm",
+            "finding": {
+                "finding_type": "strength_conflict",
+                "finding_index": 99,
+                "finding_data": {},
+            },
+        },
+    )
+
+    assert response.status_code == 400
+    assert "finding index" in response.json()["detail"].lower()

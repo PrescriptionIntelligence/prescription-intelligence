@@ -1,14 +1,31 @@
+from datetime import datetime, timedelta, timezone
+
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordRequestForm
 from pydantic import BaseModel, EmailStr, Field
 from sqlalchemy.orm import Session
 
 from backend.database import get_db
-from backend.models import CustomerDB, OrganizationDB, UserDB
+from backend.models import (
+    CustomerDB,
+    OrganizationDB,
+    UserDB,
+)
+from backend.schemas import (
+    EmailVerificationResponse,
+    ResendVerificationRequest,
+    VerifyEmailRequest,
+)
 from backend.security import (
     create_access_token,
+    generate_email_verification_token,
+    hash_email_verification_token,
     hash_password,
+    verify_email_verification_token,
     verify_password,
+)
+from backend.services.email_service import (
+    send_email_verification,
 )
 
 
@@ -29,6 +46,8 @@ class RegisterRequest(BaseModel):
     Creates:
         OrganizationDB
         UserDB(role="pharmacist")
+
+    The account must verify its email before login.
     """
 
     name: str = Field(
@@ -54,8 +73,8 @@ class CustomerRegisterRequest(BaseModel):
     Customer self-registration.
 
     Customer accounts are not tied to one pharmacy.
-    A customer can therefore have prescriptions from
-    multiple pharmacies.
+
+    The account must verify its email before login.
     """
 
     name: str = Field(
@@ -95,6 +114,9 @@ class LoginRequest(BaseModel):
 # =========================================================
 
 def _normalize_email(email: str) -> str:
+    """
+    Normalize email addresses consistently.
+    """
     return email.strip().lower()
 
 
@@ -121,7 +143,10 @@ def _generate_unique_customer_code(
         prefix = "CUSTOMER"
 
     for _ in range(20):
-        code = f"{prefix}-{secrets.randbelow(9000) + 1000}"
+        code = (
+            f"{prefix}-"
+            f"{secrets.randbelow(9000) + 1000}"
+        )
 
         existing = (
             db.query(CustomerDB)
@@ -165,6 +190,8 @@ def _build_auth_response(
                 if user.organization_id
                 else None
             ),
+            "is_active": user.is_active,
+            "email_verified": user.email_verified,
         },
         "organization": (
             {
@@ -178,6 +205,30 @@ def _build_auth_response(
     }
 
 
+def _create_verification_data() -> tuple[str, str, datetime]:
+    """
+    Create a raw verification token, its hash,
+    and its expiration timestamp.
+    """
+
+    token = generate_email_verification_token()
+
+    token_hash = hash_email_verification_token(
+        token
+    )
+
+    expires_at = (
+        datetime.now(timezone.utc)
+        + timedelta(minutes=30)
+    )
+
+    return (
+        token,
+        token_hash,
+        expires_at,
+    )
+
+
 # =========================================================
 # SHARED AUTHENTICATION
 # =========================================================
@@ -189,9 +240,17 @@ def _authenticate(
 ) -> dict:
     """
     Authenticate pharmacist, customer, or admin.
+
+    Pharmacists and customers MUST have verified
+    email addresses before they can receive a JWT.
+
+    Admin accounts are controlled separately and are
+    not subject to public email registration.
     """
 
-    normalized_email = _normalize_email(email)
+    normalized_email = _normalize_email(
+        email
+    )
 
     user = (
         db.query(UserDB)
@@ -228,6 +287,26 @@ def _authenticate(
             detail="User account is inactive",
         )
 
+    # -----------------------------------------------------
+    # Mandatory email verification
+    # -----------------------------------------------------
+
+    if (
+        user.role in {"pharmacist", "customer"}
+        and not user.email_verified
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=(
+                "Email address is not verified. "
+                "Please verify your email before signing in."
+            ),
+        )
+
+    # -----------------------------------------------------
+    # Create JWT only after all checks pass
+    # -----------------------------------------------------
+
     token = create_access_token(
         user_id=str(user.id),
         role=user.role,
@@ -237,6 +316,12 @@ def _authenticate(
             else None
         ),
     )
+
+    user.last_login_at = datetime.now(
+        timezone.utc
+    )
+
+    db.commit()
 
     return _build_auth_response(
         user=user,
@@ -260,14 +345,28 @@ def register(
     """
     Register a new pharmacy and its first pharmacist.
 
-    Public registration can only create a pharmacist account.
+    Flow:
 
-    Admin accounts are intentionally NOT created here.
+        registration
+            ↓
+        unverified account
+            ↓
+        verification email
+            ↓
+        email verification
+            ↓
+        login
+
+    No JWT is issued during registration.
     """
 
     normalized_email = _normalize_email(
         request.email
     )
+
+    # -----------------------------------------------------
+    # Prevent duplicate account
+    # -----------------------------------------------------
 
     existing_user = (
         db.query(UserDB)
@@ -308,7 +407,17 @@ def register(
         counter += 1
 
     # -----------------------------------------------------
-    # Create pharmacy organization
+    # Generate email verification credentials
+    # -----------------------------------------------------
+
+    (
+        verification_token,
+        verification_token_hash,
+        verification_expires_at,
+    ) = _create_verification_data()
+
+    # -----------------------------------------------------
+    # Create organization
     # -----------------------------------------------------
 
     organization = OrganizationDB(
@@ -331,6 +440,13 @@ def register(
             request.password
         ),
         role="pharmacist",
+        email_verified=False,
+        email_verification_token_hash=(
+            verification_token_hash
+        ),
+        email_verification_expires_at=(
+            verification_expires_at
+        ),
     )
 
     db.add(user)
@@ -350,22 +466,57 @@ def register(
         )
 
     # -----------------------------------------------------
-    # Login immediately after registration
+    # Send verification email
     # -----------------------------------------------------
 
-    token = create_access_token(
-        user_id=str(user.id),
-        role=user.role,
-        organization_id=str(
-            organization.id
-        ),
-    )
+    try:
+        send_email_verification(
+            recipient_email=user.email,
+            recipient_name=user.name,
+            verification_token=verification_token,
+        )
 
-    return _build_auth_response(
-        user=user,
-        token=token,
-        message="Account created successfully",
-    )
+        user.email_verification_sent_at = datetime.now(
+            timezone.utc
+        )
+        db.commit()
+
+    except Exception:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=(
+                "Your account was created, but the verification email "
+                "could not be sent. Please use resend verification."
+            ),
+        )
+
+    # -----------------------------------------------------
+    # IMPORTANT:
+    # No JWT is returned here.
+    # -----------------------------------------------------
+
+    return {
+        "message": (
+            "Account created successfully. "
+            "Please verify your email before signing in."
+        ),
+        "email_verified": False,
+        "user": {
+            "id": str(user.id),
+            "name": user.name,
+            "email": user.email,
+            "role": user.role,
+            "organization_id": str(
+                user.organization_id
+            ),
+            "is_active": user.is_active,
+        },
+        "organization": {
+            "id": str(organization.id),
+            "name": organization.name,
+            "slug": organization.slug,
+        },
+    }
 
 
 # =========================================================
@@ -383,18 +534,10 @@ def register_customer(
     """
     Register a customer account.
 
-    IMPORTANT:
-    A customer is not assigned to a single pharmacy.
+    Customer accounts are global and can later be
+    associated with multiple pharmacies.
 
-    This allows the same customer to have prescriptions
-    associated with Pharmacy A, Pharmacy B, Pharmacy C, etc.
-
-    The CustomerDB organization_id is currently required by
-    the existing database schema, so the customer UserDB
-    account is created first.
-
-    The CustomerDB profile will be linked when the customer
-    is associated with a pharmacy/prescription.
+    No JWT is issued until email verification.
     """
 
     normalized_email = _normalize_email(
@@ -420,6 +563,16 @@ def register_customer(
         )
 
     # -----------------------------------------------------
+    # Generate verification credentials
+    # -----------------------------------------------------
+
+    (
+        verification_token,
+        verification_token_hash,
+        verification_expires_at,
+    ) = _create_verification_data()
+
+    # -----------------------------------------------------
     # Create customer UserDB account
     # -----------------------------------------------------
 
@@ -431,6 +584,13 @@ def register_customer(
             request.password
         ),
         role="customer",
+        email_verified=False,
+        email_verification_token_hash=(
+            verification_token_hash
+        ),
+        email_verification_expires_at=(
+            verification_expires_at
+        ),
     )
 
     db.add(user)
@@ -448,30 +608,307 @@ def register_customer(
         )
 
     # -----------------------------------------------------
-    # Customer JWT
+    # Send verification email
     # -----------------------------------------------------
 
-    token = create_access_token(
-        user_id=str(user.id),
-        role="customer",
-        organization_id=None,
-    )
+    try:
+        send_email_verification(
+            recipient_email=user.email,
+            recipient_name=user.name,
+            verification_token=verification_token,
+        )
 
-    response = _build_auth_response(
-        user=user,
-        token=token,
-        message="Customer account created successfully",
-    )
+        user.email_verification_sent_at = datetime.now(
+            timezone.utc
+        )
+        db.commit()
 
-    # Customer-specific information for the frontend.
-    response["customer"] = {
-        "profile_linked": False,
-        "customer_code": request.customer_code,
-        "phone": request.phone,
+    except Exception:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=(
+                "Your account was created, but the verification email "
+                "could not be sent. Please use resend verification."
+            ),
+        )
+
+    # -----------------------------------------------------
+    # IMPORTANT:
+    # No JWT is returned here.
+    # -----------------------------------------------------
+
+    return {
+        "message": (
+            "Customer account created successfully. "
+            "Please verify your email before signing in."
+        ),
+        "email_verified": False,
+        "user": {
+            "id": str(user.id),
+            "name": user.name,
+            "email": user.email,
+            "role": user.role,
+            "organization_id": None,
+            "is_active": user.is_active,
+        },
+        "customer": {
+            "profile_linked": False,
+            "customer_code": request.customer_code,
+            "phone": request.phone,
+        },
     }
 
-    return response
 
+# =========================================================
+# VERIFY EMAIL
+# =========================================================
+
+@router.post(
+    "/verify-email",
+    response_model=EmailVerificationResponse,
+)
+def verify_email(
+    request: VerifyEmailRequest,
+    db: Session = Depends(get_db),
+):
+    """
+    Verify ownership of an email address.
+
+    The token is:
+        - hashed in the database
+        - time limited
+        - invalidated after successful verification
+    """
+
+    normalized_email = _normalize_email(
+        request.email
+    )
+
+    user = (
+        db.query(UserDB)
+        .filter(
+            UserDB.email == normalized_email
+        )
+        .first()
+    )
+
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid verification request",
+        )
+
+    if user.email_verified:
+        return {
+            "message": "Email address is already verified",
+            "email_verified": True,
+        }
+
+    if not user.email_verification_token_hash:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="No active verification request exists",
+        )
+
+    expires_at = (
+        user.email_verification_expires_at
+    )
+
+    if not expires_at:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Verification request is invalid",
+        )
+
+    now = datetime.now(timezone.utc)
+
+    # -----------------------------------------------------
+    # Expiration
+    # -----------------------------------------------------
+
+    if expires_at < now:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                "Verification link has expired. "
+                "Please request a new verification email."
+            ),
+        )
+
+    # -----------------------------------------------------
+    # Token validation
+    # -----------------------------------------------------
+
+    if not verify_email_verification_token(
+        request.token,
+        user.email_verification_token_hash,
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid verification token",
+        )
+
+    # -----------------------------------------------------
+    # Mark verified
+    # -----------------------------------------------------
+
+    user.email_verified = True
+
+    # One-time token:
+    # remove it immediately after successful use.
+    user.email_verification_token_hash = None
+    user.email_verification_expires_at = None
+    user.email_verification_sent_at = None
+
+    db.commit()
+
+    return {
+        "message": "Email address verified successfully",
+        "email_verified": True,
+    }
+
+
+# =========================================================
+# RESEND VERIFICATION
+# =========================================================
+
+@router.post(
+    "/resend-verification",
+)
+def resend_verification(
+    request: ResendVerificationRequest,
+    db: Session = Depends(get_db),
+):
+    """
+    Generate and send a fresh verification token.
+
+    Security properties:
+        - generic response prevents account enumeration
+        - 60-second database-backed resend cooldown
+        - previous token is replaced
+        - new token expires after 30 minutes
+        - email is only marked as sent after successful delivery
+    """
+
+    RESEND_COOLDOWN_SECONDS = 60
+
+    normalized_email = _normalize_email(
+        request.email
+    )
+
+    generic_response = {
+        "message": (
+            "If an account exists for this email, "
+            "a verification email has been sent."
+        )
+    }
+
+    user = (
+        db.query(UserDB)
+        .filter(
+            UserDB.email == normalized_email
+        )
+        .first()
+    )
+
+    # -----------------------------------------------------
+    # Prevent account enumeration
+    # -----------------------------------------------------
+
+    if not user:
+        return generic_response
+
+    if user.email_verified:
+        return {
+            "message": "Email address is already verified."
+        }
+
+    # -----------------------------------------------------
+    # Resend cooldown
+    # -----------------------------------------------------
+
+    now = datetime.now(timezone.utc)
+
+    if user.email_verification_sent_at:
+        elapsed = (
+            now - user.email_verification_sent_at
+        ).total_seconds()
+
+        if elapsed < RESEND_COOLDOWN_SECONDS:
+            remaining = max(
+                1,
+                int(
+                    RESEND_COOLDOWN_SECONDS
+                    - elapsed
+                ),
+            )
+
+            raise HTTPException(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                detail=(
+                    "Please wait before requesting "
+                    "another verification email."
+                ),
+                headers={
+                    "Retry-After": str(remaining),
+                },
+            )
+
+    # -----------------------------------------------------
+    # Generate fresh token
+    # -----------------------------------------------------
+
+    (
+        verification_token,
+        verification_token_hash,
+        verification_expires_at,
+    ) = _create_verification_data()
+
+    user.email_verification_token_hash = (
+        verification_token_hash
+    )
+
+    user.email_verification_expires_at = (
+        verification_expires_at
+    )
+
+    # Commit the new token before sending.
+    #
+    # If sending fails, the account remains unverified
+    # and the user can retry after the cooldown.
+    db.commit()
+
+    # -----------------------------------------------------
+    # Send email
+    # -----------------------------------------------------
+
+    try:
+        send_email_verification(
+            recipient_email=user.email,
+            recipient_name=user.name,
+            verification_token=verification_token,
+        )
+
+    except Exception:
+        db.rollback()
+
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=(
+                "Unable to send the verification email. "
+                "Please try again later."
+            ),
+        )
+
+    # -----------------------------------------------------
+    # Record successful email delivery attempt
+    # -----------------------------------------------------
+
+    user.email_verification_sent_at = now
+
+    db.commit()
+
+    return generic_response
 
 # =========================================================
 # LOGIN
@@ -486,10 +923,12 @@ def login(
     JSON login endpoint used by the frontend.
 
     Supports:
-
         pharmacist
         customer
         admin
+
+    Pharmacist and customer accounts must have verified
+    email addresses.
     """
 
     return _authenticate(

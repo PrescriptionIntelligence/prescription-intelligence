@@ -3,7 +3,14 @@
 import Link from "next/link";
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
-import { getUser, isAuthenticated, logout, User, authFetch } from "../../lib/auth";
+import {
+  getUser,
+  isAuthenticated,
+  logout,
+  User,
+  authFetch,
+  getRoleHome,
+} from "../../lib/auth";
 
 // =========================================================
 // Types
@@ -87,15 +94,27 @@ export default function DashboardPage() {
       return;
     }
 
-    // getUser() reads from localStorage — safe to call during effect
     const stored = getUser();
-    // Use a timeout-free state update to avoid cascading renders warning
+
+    if (!stored) {
+      router.replace("/sign-in");
+      return;
+    }
+
+    // Customers have their own completely separate workspace.
+    if (stored.role === "customer") {
+      router.replace(getRoleHome(stored));
+      return;
+    }
+
     Promise.resolve().then(() => setUser(stored));
 
-    // Load dashboard statistics from backend
     authFetch("/dashboard/stats")
       .then((res) => {
-        if (!res.ok) throw new Error("Failed to load dashboard data");
+        if (!res.ok) {
+          throw new Error("Failed to load dashboard data");
+        }
+
         return res.json();
       })
       .then((data: DashboardStats) => {
@@ -103,10 +122,14 @@ export default function DashboardPage() {
       })
       .catch((err) => {
         setStatsError(
-          err instanceof Error ? err.message : "Could not load statistics"
+          err instanceof Error
+            ? err.message
+            : "Could not load statistics"
         );
       })
-      .finally(() => setLoadingStats(false));
+      .finally(() => {
+        setLoadingStats(false);
+      });
   }, [router]);
 
   if (!user) {

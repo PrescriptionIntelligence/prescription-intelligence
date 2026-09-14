@@ -1,8 +1,17 @@
-from pydantic import BaseModel, Field, field_validator
+from pydantic import (
+    BaseModel,
+    EmailStr,
+    Field,
+    field_validator,
+)
 from typing import Any, Optional
 from uuid import UUID
 from datetime import date, datetime
 
+
+# =========================================================
+# MEDICINE
+# =========================================================
 
 class DoseComponent(BaseModel):
     value: float
@@ -29,14 +38,18 @@ class MedicineBase(BaseModel):
 
     strength_value: float | str | None = None
     strength_unit: Optional[str] = None
-    strength_components: list[DoseComponent] = Field(default_factory=list)
+    strength_components: list[DoseComponent] = Field(
+        default_factory=list
+    )
 
     dose_value: Optional[float] = None
     dose_unit: Optional[str] = None
 
     daily_dose_value: Optional[float] = None
     daily_dose_unit: Optional[str] = None
-    daily_dose_components: list[DoseComponent] = Field(default_factory=list)
+    daily_dose_components: list[DoseComponent] = Field(
+        default_factory=list
+    )
 
     route: Optional[str] = None
 
@@ -89,10 +102,16 @@ class MedicineResponse(MedicineBase):
     }
 
 
+# =========================================================
+# PRESCRIPTION
+# =========================================================
+
 class PrescriptionCreate(BaseModel):
     prescription_id: str
     raw_text: Optional[str] = None
-    medicines: list[MedicineCreate] = Field(default_factory=list)
+    medicines: list[MedicineCreate] = Field(
+        default_factory=list
+    )
 
 
 class SafetyFlagResponse(BaseModel):
@@ -107,7 +126,9 @@ class PrescriptionResponse(BaseModel):
     prescription_id: str
     raw_text: Optional[str] = None
     status: str
-    safety_flags: list[Any] = Field(default_factory=list)
+    safety_flags: list[Any] = Field(
+        default_factory=list
+    )
 
     file_name: Optional[str] = None
     file_path: Optional[str] = None
@@ -115,7 +136,10 @@ class PrescriptionResponse(BaseModel):
 
     created_at: datetime
     updated_at: Optional[datetime] = None
-    medicines: list[MedicineResponse] = Field(default_factory=list)
+
+    medicines: list[MedicineResponse] = Field(
+        default_factory=list
+    )
 
     model_config = {
         "from_attributes": True
@@ -146,9 +170,9 @@ class PrescriptionUploadResponse(BaseModel):
     safety_analysis: Optional[dict] = None
 
 
-# ---------------------------------------------------------
-# Dashboard
-# ---------------------------------------------------------
+# =========================================================
+# DASHBOARD
+# =========================================================
 
 class RecentPrescriptionSummary(BaseModel):
     prescription_id: str
@@ -168,9 +192,9 @@ class DashboardStatsResponse(BaseModel):
     recent_prescriptions: list[RecentPrescriptionSummary]
 
 
-# ---------------------------------------------------------
-# Human Review Workflow
-# ---------------------------------------------------------
+# =========================================================
+# HUMAN REVIEW WORKFLOW
+# =========================================================
 
 class ReviewFinding(BaseModel):
     finding_type: str = Field(
@@ -243,32 +267,64 @@ class ReviewHistoryResponse(BaseModel):
     prescription_id: str
     current_status: str
     audits: list[ReviewAuditResponse] = Field(
-        default_factory=list,
+        default_factory=list
     )
 
 
-# ---------------------------------------------------------
-# Account / Role Management
-# ---------------------------------------------------------
+# =========================================================
+# ACCOUNT / ROLE MANAGEMENT
+# =========================================================
 
 class PharmacyRegisterRequest(BaseModel):
-    name: str = Field(min_length=2, max_length=200)
+    name: str = Field(
+        min_length=2,
+        max_length=200,
+    )
+
     email: str
-    password: str = Field(min_length=8, max_length=128)
-    pharmacy_name: str = Field(min_length=2, max_length=200)
+
+    password: str = Field(
+        min_length=8,
+        max_length=128,
+    )
+
+    pharmacy_name: str = Field(
+        min_length=2,
+        max_length=200,
+    )
 
 
 class CustomerRegisterRequest(BaseModel):
-    name: str = Field(min_length=2, max_length=200)
+    name: str = Field(
+        min_length=2,
+        max_length=200,
+    )
+
     email: str
-    password: str = Field(min_length=8, max_length=128)
-    phone: Optional[str] = Field(default=None, max_length=30)
-    customer_code: Optional[str] = Field(default=None, max_length=50)
+
+    password: str = Field(
+        min_length=8,
+        max_length=128,
+    )
+
+    phone: Optional[str] = Field(
+        default=None,
+        max_length=30,
+    )
+
+    customer_code: Optional[str] = Field(
+        default=None,
+        max_length=50,
+    )
 
 
 class LoginRequest(BaseModel):
     email: str
-    password: str = Field(min_length=1, max_length=128)
+
+    password: str = Field(
+        min_length=1,
+        max_length=128,
+    )
 
 
 class UserResponse(BaseModel):
@@ -302,6 +358,10 @@ class AuthResponse(BaseModel):
     organization: Optional[OrganizationResponse] = None
 
 
+# =========================================================
+# CUSTOMER
+# =========================================================
+
 class CustomerProfileResponse(BaseModel):
     id: UUID
     user_id: Optional[UUID] = None
@@ -318,13 +378,34 @@ class CustomerProfileResponse(BaseModel):
         "from_attributes": True
     }
 
+
 class CustomerCreateRequest(BaseModel):
-    name: str = Field(min_length=1, max_length=200)
-    phone: Optional[str] = Field(default=None, max_length=30)
-    email: Optional[str] = Field(default=None, max_length=320)
+    name: str = Field(
+        min_length=1,
+        max_length=200,
+    )
+
+    phone: Optional[str] = Field(
+        default=None,
+        max_length=30,
+    )
+
+    email: Optional[str] = Field(
+        default=None,
+        max_length=320,
+    )
+
     date_of_birth: Optional[date] = None
-    address: Optional[str] = Field(default=None, max_length=1000)
-    notes: Optional[str] = Field(default=None, max_length=5000)
+
+    address: Optional[str] = Field(
+        default=None,
+        max_length=1000,
+    )
+
+    notes: Optional[str] = Field(
+        default=None,
+        max_length=5000,
+    )
 
 
 class CustomerResponse(BaseModel):
@@ -341,7 +422,10 @@ class CustomerResponse(BaseModel):
     created_at: datetime
     updated_at: datetime
 
-    model_config = {"from_attributes": True}
+    model_config = {
+        "from_attributes": True
+    }
+
 
 class CustomerSearchResponse(BaseModel):
     id: UUID
@@ -352,7 +436,32 @@ class CustomerSearchResponse(BaseModel):
     is_active: bool
     organization_id: UUID
 
-    model_config = {"from_attributes": True}
+    model_config = {
+        "from_attributes": True
+    }
+
 
 class PrescriptionCustomerAssignRequest(BaseModel):
     customer_id: UUID
+
+
+# =========================================================
+# EMAIL VERIFICATION
+# =========================================================
+
+class VerifyEmailRequest(BaseModel):
+    email: EmailStr
+
+    token: str = Field(
+        min_length=20,
+        max_length=200,
+    )
+
+
+class ResendVerificationRequest(BaseModel):
+    email: EmailStr
+
+
+class EmailVerificationResponse(BaseModel):
+    message: str
+    email_verified: bool

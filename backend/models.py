@@ -80,7 +80,9 @@ class OrganizationDB(Base):
         back_populates="organization",
     )
 
-    customer_memberships: Mapped[list["CustomerOrganizationDB"]] = relationship(
+    customer_memberships: Mapped[
+        list["CustomerOrganizationDB"]
+    ] = relationship(
         back_populates="organization",
         cascade="all, delete-orphan",
     )
@@ -116,6 +118,37 @@ class UserDB(Base):
         nullable=False,
     )
 
+    # -----------------------------------------------------
+    # Email verification
+    # -----------------------------------------------------
+
+    email_verified: Mapped[bool] = mapped_column(
+        Boolean,
+        default=False,
+        nullable=False,
+        index=True,
+    )
+
+    email_verification_token_hash: Mapped[str | None] = mapped_column(
+        String(128),
+        nullable=True,
+    )
+
+    email_verification_expires_at: Mapped[
+        datetime | None
+    ] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+
+    email_verification_sent_at: Mapped[
+        datetime | None
+    ] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+        index=True,
+    )
+
     password_hash: Mapped[str] = mapped_column(
         String(500),
         nullable=False,
@@ -149,17 +182,23 @@ class UserDB(Base):
         back_populates="users",
     )
 
-    uploaded_prescriptions: Mapped[list["PrescriptionDB"]] = relationship(
+    uploaded_prescriptions: Mapped[
+        list["PrescriptionDB"]
+    ] = relationship(
         back_populates="uploaded_by",
         foreign_keys="PrescriptionDB.uploaded_by_id",
     )
 
-    reviewed_prescriptions: Mapped[list["PrescriptionDB"]] = relationship(
+    reviewed_prescriptions: Mapped[
+        list["PrescriptionDB"]
+    ] = relationship(
         back_populates="reviewed_by",
         foreign_keys="PrescriptionDB.reviewed_by_id",
     )
 
-    customer_profile: Mapped["CustomerDB | None"] = relationship(
+    customer_profile: Mapped[
+        "CustomerDB | None"
+    ] = relationship(
         back_populates="user",
         foreign_keys="CustomerDB.user_id",
         uselist=False,
@@ -260,15 +299,20 @@ class CustomerDB(Base):
         back_populates="customers",
     )
 
-    prescriptions: Mapped[list["PrescriptionDB"]] = relationship(
+    prescriptions: Mapped[
+        list["PrescriptionDB"]
+    ] = relationship(
         back_populates="customer",
     )
 
-    organization_memberships: Mapped[list["CustomerOrganizationDB"]] = relationship(
+    organization_memberships: Mapped[
+        list["CustomerOrganizationDB"]
+    ] = relationship(
         back_populates="customer",
         foreign_keys="CustomerOrganizationDB.customer_id",
         cascade="all, delete-orphan",
     )
+
 
 class CustomerOrganizationDB(Base):
     """
@@ -320,6 +364,7 @@ class CustomerOrganizationDB(Base):
             name="uq_customer_organization",
         ),
     )
+
 
 # =========================================================
 # PRESCRIPTION
@@ -450,25 +495,35 @@ class PrescriptionDB(Base):
     # Relationships
     # -----------------------------------------------------
 
-    organization: Mapped["OrganizationDB | None"] = relationship(
+    organization: Mapped[
+        "OrganizationDB | None"
+    ] = relationship(
         back_populates="prescriptions",
     )
 
-    uploaded_by: Mapped["UserDB | None"] = relationship(
+    uploaded_by: Mapped[
+        "UserDB | None"
+    ] = relationship(
         back_populates="uploaded_prescriptions",
         foreign_keys=[uploaded_by_id],
     )
 
-    reviewed_by: Mapped["UserDB | None"] = relationship(
+    reviewed_by: Mapped[
+        "UserDB | None"
+    ] = relationship(
         back_populates="reviewed_prescriptions",
         foreign_keys=[reviewed_by_id],
     )
 
-    customer: Mapped["CustomerDB | None"] = relationship(
+    customer: Mapped[
+        "CustomerDB | None"
+    ] = relationship(
         back_populates="prescriptions",
     )
 
-    medicines: Mapped[list["MedicineDB"]] = relationship(
+    medicines: Mapped[
+        list["MedicineDB"]
+    ] = relationship(
         back_populates="prescription",
         cascade="all, delete-orphan",
     )

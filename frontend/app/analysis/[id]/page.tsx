@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { useEffect, useState } from "react";
 import { useParams } from "next/navigation";
+import { authFetch } from "@/lib/auth";
 
 // =========================================================
 // Types
@@ -316,8 +317,8 @@ export default function AnalysisDetailPage() {
       setReportError("");
 
       try {
-        const response = await fetch(
-          `${API_URL}/prescriptions/${encodeURIComponent(
+        const response = await authFetch(
+          `/prescriptions/${encodeURIComponent(
             prescriptionId
           )}/report`
         );
@@ -382,6 +383,29 @@ export default function AnalysisDetailPage() {
       }
     };
 
+    // -------------------------------------------------------
+  // Open pharmacist review
+  // -------------------------------------------------------
+
+  const handleReviewPrescription = () => {
+    if (!prescription) {
+      return;
+    }
+
+    sessionStorage.setItem(
+      "prescription_review",
+      JSON.stringify(prescription)
+    );
+
+    sessionStorage.setItem(
+      "prescription_file_name",
+      prescription.file_name ||
+        "uploaded prescription"
+    );
+
+    window.location.href = "/review";
+  };
+
   // -------------------------------------------------------
   // Load prescription
   // -------------------------------------------------------
@@ -443,8 +467,10 @@ export default function AnalysisDetailPage() {
       }
     }
 
-    fetch(
-      `${API_URL}/prescriptions/${prescriptionId}`
+    authFetch(
+      `/prescriptions/${encodeURIComponent(
+        prescriptionId
+      )}`
     )
       .then((response) => {
         if (!response.ok) {
@@ -468,7 +494,7 @@ export default function AnalysisDetailPage() {
       .finally(() => {
         setLoading(false);
       });
-  }, [prescriptionId]);
+    }, [prescriptionId]);
 
   // -------------------------------------------------------
   // Loading
@@ -763,6 +789,21 @@ export default function AnalysisDetailPage() {
 
                   {statusLabel}
                 </span>
+
+                {needsReview && (
+                  <button
+                    type="button"
+                    onClick={
+                      handleReviewPrescription
+                    }
+                    className="inline-flex items-center gap-2 rounded-xl border border-[#d6b96d] bg-[#fff9e8] px-4 py-2.5 text-xs font-semibold text-[#725719] shadow-sm transition hover:bg-[#fff4d2]"
+                  >
+                    <span className="text-sm leading-none">
+                      ✓
+                    </span>
+                    Review prescription
+                  </button>
+                )}
 
                 <button
                   type="button"

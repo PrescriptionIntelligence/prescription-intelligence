@@ -13,7 +13,6 @@ from backend.models import (
 )
 from backend.schemas import (
     ReviewActionRequest,
-    ReviewAuditResponse,
     ReviewHistoryResponse,
     ReviewStatusResponse,
 )
@@ -43,6 +42,12 @@ VALID_STATUSES = {
     "verified",
     "needs_clarification",
     "rejected",
+}
+
+RESOLVING_ACTIONS = {
+    "confirm",
+    "correct",
+    "dismiss",
 }
 
 
@@ -91,9 +96,15 @@ def get_owned_prescription(
     return prescription
 
 
-def get_high_priority_findings(
+def get_all_findings(
     prescription: PrescriptionDB,
 ) -> list[dict[str, Any]]:
+    """
+    Return only dictionary-based safety findings.
+
+    The original AI findings are never modified by the
+    review workflow.
+    """
 
     flags = prescription.safety_flags or []
 
@@ -101,7 +112,147 @@ def get_high_priority_findings(
         flag
         for flag in flags
         if isinstance(flag, dict)
-        and str(flag.get("severity", "")).lower()
+    ]
+
+
+def get_high_priority_findings(
+    prescription: PrescriptionDB,
+) -> list[dict[str, Any]]:
+
+    findings = get_all_findings(prescription)
+
+    return [
+        finding
+        for finding in findings
+        if str(
+            finding.get("severity", "")
+        ).lower()
+        in {
+            "high",
+            "critical",
+            "error",
+        }
+    ]
+
+
+def get_finding_key(
+    finding_index: int,
+) -> str:
+    """
+    Generate the stable identity used by the review audit
+    history for a finding.
+
+    Finding identity is intentionally based on the finding's
+    position within the immutable prescription analysis.
+    """
+
+    return f"finding:{finding_index}"
+
+
+def get_finding_index_from_audit(
+    audit: ReviewAuditDB,
+) -> int | None:
+
+    if not audit.finding_data:
+        return None
+
+    value = audit.finding_data.get(
+        "finding_index"
+    )
+
+    if isinstance(value, int):
+        return value
+
+    return None
+
+
+def get_resolved_finding_indexes(
+    prescription: PrescriptionDB,
+    db: Session,
+) -> set[int]:
+    """
+    Determine which findings have been resolved by the
+    latest pharmacist action.
+
+    The original safety_flags remain unchanged.
+
+    Only confirm/correct/dismiss resolve a finding.
+    Clarification does not resolve it.
+    """
+
+    audits = (
+        db.query(ReviewAuditDB)
+        .filter(
+            ReviewAuditDB.prescription_id
+            == prescription.id
+        )
+        .order_by(
+            ReviewAuditDB.created_at.asc(),
+            ReviewAuditDB.id.asc(),
+        )
+        .all()
+    )
+
+    latest_actions: dict[int, str] = {}
+
+    for audit in audits:
+        finding_index = (
+            get_finding_index_from_audit(audit)
+        )
+
+        if finding_index is None:
+            continue
+
+        latest_actions[
+            finding_index
+        ] = audit.action
+
+    return {
+        finding_index
+        for finding_index, action
+        in latest_actions.items()
+        if action in RESOLVING_ACTIONS
+    }
+
+
+def get_unresolved_findings(
+    prescription: PrescriptionDB,
+    db: Session,
+) -> list[dict[str, Any]]:
+
+    findings = get_all_findings(prescription)
+
+    resolved_indexes = (
+        get_resolved_finding_indexes(
+            prescription,
+            db,
+        )
+    )
+
+    return [
+        finding
+        for index, finding
+        in enumerate(findings)
+        if index not in resolved_indexes
+    ]
+
+
+def get_unresolved_high_priority_findings(
+    prescription: PrescriptionDB,
+    db: Session,
+) -> list[dict[str, Any]]:
+
+    unresolved = get_unresolved_findings(
+        prescription,
+        db,
+    )
+
+    return [
+        finding
+        for finding in unresolved
+        if str(
+            finding.get("severity", "")
+        ).lower()
         in {
             "high",
             "critical",
@@ -123,13 +274,163 @@ def validate_action(action: str) -> None:
         )
 
 
+def validate_finding(
+    prescription: PrescriptionDB,
+    request: ReviewActionRequest,
+) -> None:
+    """
+    Validate that the requested finding actually exists and
+    that the supplied finding type matches the immutable
+    AI-generated finding at that index.
+    """
+
+    if request.action == "start_review":
+        return
+
+    if request.finding is None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                "A finding is required for this review action."
+            ),
+        )
+
+    finding_index = (
+        request.finding.finding_index
+    )
+
+    if finding_index is None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                "Finding index is required for this "
+                "review action."
+            ),
+        )
+
+    findings = get_all_findings(
+        prescription
+    )
+
+    if finding_index >= len(findings):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                f"Finding index {finding_index} "
+                "is out of range."
+            ),
+        )
+
+    actual_finding = findings[
+        finding_index
+    ]
+
+    actual_type = str(
+        actual_finding.get(
+            "type",
+            actual_finding.get(
+                "finding_type",
+                "",
+            ),
+        )
+    ).strip().lower()
+
+    requested_type = (
+        request.finding.finding_type
+        .strip()
+        .lower()
+    )
+
+    if actual_type != requested_type:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                f"Finding type '{request.finding.finding_type}' "
+                f"does not match the finding at index "
+                f"{finding_index}."
+            ),
+        )
+
+
 def determine_new_status(
     prescription: PrescriptionDB,
     action: str,
+    db: Session,
+    finding_index: int | None = None,
 ) -> str:
+    unresolved_high_priority = (
+        get_unresolved_high_priority_findings(
+            prescription,
+            db,
+        )
+    )
 
-    high_priority = get_high_priority_findings(
-        prescription
+    current_finding = None
+
+    if (
+        action in RESOLVING_ACTIONS
+        and finding_index is not None
+    ):
+        findings = get_all_findings(prescription)
+
+        if 0 <= finding_index < len(findings):
+            current_finding = findings[finding_index]
+
+            current_severity = str(
+                current_finding.get(
+                    "severity",
+                    "",
+                )
+            ).lower()
+
+            if current_severity in {
+                "high",
+                "critical",
+                "error",
+            }:
+                unresolved_high_priority = [
+                    finding
+                    for finding in unresolved_high_priority
+                    if finding is not current_finding
+                ]
+
+    if action == "start_review":
+        return "under_review"
+
+    if action == "clarify":
+        return "needs_clarification"
+
+    if action == "dismiss":
+        if unresolved_high_priority:
+            return "under_review"
+
+        if (
+            current_finding is not None
+            and str(
+                current_finding.get(
+                    "severity",
+                    "",
+                )
+            ).lower()
+            in {"high", "critical", "error"}
+        ):
+            return "rejected"
+
+        return "verified"
+
+    if action == "correct":
+        if unresolved_high_priority:
+            return "under_review"
+        return "verified"
+
+    if action == "confirm":
+        if unresolved_high_priority:
+            return "under_review"
+        return "verified"
+
+    raise HTTPException(
+        status_code=status.HTTP_400_BAD_REQUEST,
+        detail="Unable to determine review status",
     )
 
     # -----------------------------------------------------
@@ -151,6 +452,10 @@ def determine_new_status(
     # -----------------------------------------------------
 
     if action == "dismiss":
+
+        if unresolved_high_priority:
+            return "under_review"
+
         return "rejected"
 
     # -----------------------------------------------------
@@ -159,7 +464,7 @@ def determine_new_status(
 
     if action == "correct":
 
-        if high_priority:
+        if unresolved_high_priority:
             return "under_review"
 
         return "verified"
@@ -170,15 +475,59 @@ def determine_new_status(
 
     if action == "confirm":
 
-        # Critical safety rule:
-        #
-        # A prescription containing high-priority findings
-        # cannot become verified merely because the reviewer
-        # presses "confirm".
-        #
-        # The reviewer must explicitly resolve/correct the
-        # finding first.
-        if high_priority:
+        if unresolved_high_priority:
+            return "under_review"
+
+        return "verified"
+
+    raise HTTPException(
+        status_code=status.HTTP_400_BAD_REQUEST,
+        detail="Unable to determine review status",
+    )
+
+    # -----------------------------------------------------
+    # Start review
+    # -----------------------------------------------------
+
+    if action == "start_review":
+        return "under_review"
+
+    # -----------------------------------------------------
+    # Clarification
+    # -----------------------------------------------------
+
+    if action == "clarify":
+        return "needs_clarification"
+
+    # -----------------------------------------------------
+    # Explicit rejection
+    # -----------------------------------------------------
+
+    if action == "dismiss":
+
+        if unresolved_high_priority:
+            return "under_review"
+
+        return "rejected"
+
+    # -----------------------------------------------------
+    # Correction
+    # -----------------------------------------------------
+
+    if action == "correct":
+
+        if unresolved_high_priority:
+            return "under_review"
+
+        return "verified"
+
+    # -----------------------------------------------------
+    # Confirmation
+    # -----------------------------------------------------
+
+    if action == "confirm":
+
+        if unresolved_high_priority:
             return "under_review"
 
         return "verified"
@@ -211,8 +560,11 @@ def get_review_status(
         db,
     )
 
-    high_priority = get_high_priority_findings(
-        prescription
+    high_priority = (
+        get_unresolved_high_priority_findings(
+            prescription,
+            db,
+        )
     )
 
     reviewer = None
@@ -277,6 +629,11 @@ def review_prescription(
         db,
     )
 
+    validate_finding(
+        prescription,
+        request,
+    )
+
     previous_status = (
         prescription.review_status
         or "pending"
@@ -302,12 +659,18 @@ def review_prescription(
         )
 
     # -----------------------------------------------------
-    # Resolve new status
+    # Determine new prescription status
     # -----------------------------------------------------
 
     new_status = determine_new_status(
         prescription,
         request.action,
+        db,
+        (
+            request.finding.finding_index
+            if request.finding
+            else None
+        ),
     )
 
     now = datetime.now(timezone.utc)
@@ -329,10 +692,20 @@ def review_prescription(
             request.finding.finding_data
         )
 
-        if request.finding.finding_index is not None:
+        finding_index = (
+            request.finding.finding_index
+        )
+
+        if finding_index is not None:
             finding_data[
                 "finding_index"
-            ] = request.finding.finding_index
+            ] = finding_index
+
+            finding_data[
+                "finding_key"
+            ] = get_finding_key(
+                finding_index
+            )
 
     # -----------------------------------------------------
     # Update prescription review state
@@ -383,8 +756,11 @@ def review_prescription(
             ),
         )
 
-    high_priority = get_high_priority_findings(
-        prescription
+    high_priority = (
+        get_unresolved_high_priority_findings(
+            prescription,
+            db,
+        )
     )
 
     return {
@@ -445,7 +821,8 @@ def get_review_history(
             == prescription.id
         )
         .order_by(
-            ReviewAuditDB.created_at.asc()
+            ReviewAuditDB.created_at.asc(),
+            ReviewAuditDB.id.asc(),
         )
         .all()
     )

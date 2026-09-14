@@ -1,7 +1,8 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
+import { authFetch, isAuthenticated } from "@/lib/auth";
 
 /* =========================================================
    API TYPES
@@ -74,6 +75,8 @@ type SafetyFlag = {
   severity?: string;
   medicine?: string | null;
   message?: string;
+  review_note?: string;
+  [key: string]: unknown;
 };
 
 type PrescriptionResult = {
@@ -86,6 +89,45 @@ type PrescriptionResult = {
   raw_text?: string | null;
   medicines?: Medicine[];
   safety_flags?: SafetyFlag[];
+};
+
+type ReviewStatus = {
+  prescription_id: string;
+  review_status: string;
+  reviewed_by_id?: string | null;
+  reviewed_at?: string | null;
+  review_notes?: string | null;
+  reviewer?: {
+    id?: string;
+    name?: string;
+    email?: string;
+    role?: string;
+  } | null;
+  high_priority_findings: number;
+  total_findings: number;
+};
+
+type ReviewAudit = {
+  id: string;
+  prescription_id: string;
+  reviewer_id: string;
+  action: string;
+  previous_status: string;
+  new_status: string;
+  finding_type?: string | null;
+  finding_data?: {
+    finding_index?: number;
+    finding_key?: string;
+    [key: string]: unknown;
+  } | null;
+  note?: string | null;
+  created_at: string;
+};
+
+type ReviewHistory = {
+  prescription_id: string;
+  current_status: string;
+  audits: ReviewAudit[];
 };
 
 /* =========================================================
@@ -143,6 +185,60 @@ function getReviewRequired(medicine: Medicine) {
   );
 }
 
+function formatReviewStatus(status?: string) {
+  if (!status) return "Pending";
+
+  return status
+    .split("_")
+    .map(
+      (part) =>
+        part.charAt(0).toUpperCase() + part.slice(1)
+    )
+    .join(" ");
+}
+
+function formatAction(action: string) {
+  return action
+    .split("_")
+    .map(
+      (part) =>
+        part.charAt(0).toUpperCase() + part.slice(1)
+    )
+    .join(" ");
+}
+
+function formatTimestamp(value?: string | null) {
+  if (!value) return "—";
+
+  const date = new Date(value);
+
+  if (Number.isNaN(date.getTime())) {
+    return value;
+  }
+
+  return date.toLocaleString();
+}
+
+function getSeverityClass(severity?: string) {
+  const normalized = String(
+    severity || ""
+  ).toLowerCase();
+
+  if (
+    normalized === "high" ||
+    normalized === "critical" ||
+    normalized === "error"
+  ) {
+    return "bg-[#fff0f0] text-[#a74646] border-[#efcece]";
+  }
+
+  if (normalized === "medium") {
+    return "bg-[#fff7df] text-[#a47b2c] border-[#eadcae]";
+  }
+
+  return "bg-[#f1f5f2] text-[#65746c] border-[#dce5df]";
+}
+
 /* =========================================================
    MEDICINE CARD
    ========================================================= */
@@ -162,12 +258,8 @@ function MedicineCard({
 
   return (
     <article className="rounded-[24px] border border-[#e0e8e3] bg-[#fbfcfb] p-5 transition hover:border-[#cfdcd4] hover:shadow-[0_12px_35px_rgba(30,45,38,0.05)] sm:p-6">
-
-      {/* MEDICINE HEADER */}
       <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
-
         <div className="flex items-start gap-4">
-
           <div className="grid h-10 w-10 shrink-0 place-items-center rounded-xl bg-[#edf3ee] text-xs font-semibold text-[#60766a]">
             {String(index + 1).padStart(2, "0")}
           </div>
@@ -191,7 +283,6 @@ function MedicineCard({
                 )}
             </div>
           </div>
-
         </div>
 
         <div
@@ -203,77 +294,63 @@ function MedicineCard({
             ? `Review required · ${percentage}%`
             : `High confidence · ${percentage}%`}
         </div>
-
       </div>
 
-      {/* CORE MEDICINE DATA */}
       <div className="mt-6 grid grid-cols-2 gap-3 lg:grid-cols-4">
-
-        <div className="rounded-2xl bg-white p-4">
-          <div className="text-[9px] font-semibold uppercase tracking-[0.14em] text-[#9aa49f]">
-            Strength
-          </div>
-
-          <div className="mt-2 text-sm font-semibold text-[#35423c]">
-            {medicine.strength_value !== null &&
+        {[
+          [
+            "Strength",
+            medicine.strength_value !== null &&
             medicine.strength_value !== undefined
               ? `${medicine.strength_value} ${
                   medicine.strength_unit || ""
                 }`
-              : "—"}
-          </div>
-        </div>
-
-        <div className="rounded-2xl bg-white p-4">
-          <div className="text-[9px] font-semibold uppercase tracking-[0.14em] text-[#9aa49f]">
-            Dose
-          </div>
-
-          <div className="mt-2 text-sm font-semibold text-[#35423c]">
-            {medicine.dose_value !== null &&
+              : "—",
+          ],
+          [
+            "Dose",
+            medicine.dose_value !== null &&
             medicine.dose_value !== undefined
               ? `${medicine.dose_value} ${
                   medicine.dose_unit || ""
                 }`
-              : "—"}
-          </div>
-        </div>
-
-        <div className="rounded-2xl bg-white p-4">
-          <div className="text-[9px] font-semibold uppercase tracking-[0.14em] text-[#9aa49f]">
-            Frequency
-          </div>
-
-          <div className="mt-2 text-sm font-semibold text-[#35423c]">
-            {medicine.frequency_value !== null &&
+              : "—",
+          ],
+          [
+            "Frequency",
+            medicine.frequency_value !== null &&
             medicine.frequency_value !== undefined
               ? `${medicine.frequency_value} ${
                   medicine.frequency_unit || ""
                 }`
-              : "—"}
-          </div>
-        </div>
-
-        <div className="rounded-2xl bg-white p-4">
-          <div className="text-[9px] font-semibold uppercase tracking-[0.14em] text-[#9aa49f]">
-            Duration
-          </div>
-
-          <div className="mt-2 text-sm font-semibold text-[#35423c]">
-            {medicine.duration_value !== null &&
+              : "—",
+          ],
+          [
+            "Duration",
+            medicine.duration_value !== null &&
             medicine.duration_value !== undefined
               ? `${medicine.duration_value} ${
                   medicine.duration_unit || ""
                 }`
-              : "—"}
-          </div>
-        </div>
+              : "—",
+          ],
+        ].map(([label, value]) => (
+          <div
+            key={String(label)}
+            className="rounded-2xl bg-white p-4"
+          >
+            <div className="text-[9px] font-semibold uppercase tracking-[0.14em] text-[#9aa49f]">
+              {label}
+            </div>
 
+            <div className="mt-2 text-sm font-semibold text-[#35423c]">
+              {value}
+            </div>
+          </div>
+        ))}
       </div>
 
-      {/* SECONDARY DATA */}
       <div className="mt-3 grid gap-3 sm:grid-cols-3">
-
         <div className="rounded-2xl border border-[#e8ece9] bg-white p-4">
           <div className="text-[9px] font-semibold uppercase tracking-[0.14em] text-[#9aa49f]">
             Daily dose
@@ -308,14 +385,10 @@ function MedicineCard({
             {medicine.instructions || "—"}
           </div>
         </div>
-
       </div>
 
-      {/* CONFIDENCE */}
       <div className="mt-5 rounded-2xl border border-[#e4eae6] bg-white p-4">
-
         <div className="flex items-center justify-between">
-
           <div>
             <div className="text-[9px] font-semibold uppercase tracking-[0.14em] text-[#9aa49f]">
               Intelligence confidence
@@ -345,7 +418,6 @@ function MedicineCard({
               </span>
             </div>
           </div>
-
         </div>
 
         <div className="mt-3 h-1.5 overflow-hidden rounded-full bg-[#e9eeeb]">
@@ -356,12 +428,12 @@ function MedicineCard({
             }}
           />
         </div>
-
       </div>
 
-      {/* EVIDENCE TOGGLE */}
       <button
-        onClick={() => setEvidenceOpen(!evidenceOpen)}
+        onClick={() =>
+          setEvidenceOpen((open) => !open)
+        }
         className="mt-4 flex w-full items-center justify-between rounded-2xl border border-[#e2e9e4] bg-white px-4 py-3 text-left transition hover:bg-[#f8faf8]"
       >
         <div>
@@ -379,12 +451,9 @@ function MedicineCard({
         </span>
       </button>
 
-      {/* EVIDENCE */}
       {evidenceOpen && (
         <div className="mt-3 rounded-2xl border border-[#e1e8e3] bg-[#f6f9f6] p-5">
-
           <div className="grid gap-3 sm:grid-cols-2">
-
             <div>
               <div className="text-[9px] uppercase tracking-[0.14em] text-[#9aa49f]">
                 Matched term
@@ -401,7 +470,8 @@ function MedicineCard({
               </div>
 
               <div className="mt-1 text-sm font-medium">
-                {medicine.evidence?.candidate_variant || "—"}
+                {medicine.evidence?.candidate_variant ||
+                  "—"}
               </div>
             </div>
 
@@ -428,17 +498,14 @@ function MedicineCard({
                   : "No"}
               </div>
             </div>
-
           </div>
 
           <div className="mt-5 border-t border-[#e0e7e2] pt-5">
-
             <div className="text-[9px] font-semibold uppercase tracking-[0.14em] text-[#9aa49f]">
               Similarity signals
             </div>
 
             <div className="mt-3 grid grid-cols-2 gap-3 sm:grid-cols-4">
-
               {[
                 [
                   "Full text",
@@ -472,21 +539,17 @@ function MedicineCard({
                   </div>
                 </div>
               ))}
-
             </div>
-
           </div>
 
           {medicine.evidence?.ranked_results &&
             medicine.evidence.ranked_results.length > 0 && (
               <div className="mt-5 border-t border-[#e0e7e2] pt-5">
-
                 <div className="text-[9px] font-semibold uppercase tracking-[0.14em] text-[#9aa49f]">
                   Ranked candidates
                 </div>
 
                 <div className="mt-3 space-y-2">
-
                   {medicine.evidence.ranked_results.map(
                     (candidate, candidateIndex) => (
                       <div
@@ -509,15 +572,12 @@ function MedicineCard({
                       </div>
                     )
                   )}
-
                 </div>
-
               </div>
             )}
 
           {medicine.raw_text && (
             <div className="mt-5 border-t border-[#e0e7e2] pt-5">
-
               <div className="text-[9px] font-semibold uppercase tracking-[0.14em] text-[#9aa49f]">
                 Source prescription segment
               </div>
@@ -525,13 +585,191 @@ function MedicineCard({
               <div className="mt-3 whitespace-pre-wrap rounded-xl bg-white p-4 text-xs leading-6 text-[#68756e]">
                 {medicine.raw_text}
               </div>
+            </div>
+          )}
+        </div>
+      )}
+    </article>
+  );
+}
 
+/* =========================================================
+   FINDING CARD
+   ========================================================= */
+
+function FindingCard({
+  flag,
+  index,
+  resolvedAction,
+  busy,
+  onAction,
+}: {
+  flag: SafetyFlag;
+  index: number;
+  resolvedAction?: string | null;
+  busy: boolean;
+  onAction: (
+    action: "confirm" | "correct" | "dismiss" | "clarify",
+    index: number,
+    flag: SafetyFlag
+  ) => void;
+}) {
+  const [noteOpen, setNoteOpen] = useState(false);
+  const [note, setNote] = useState("");
+
+  const resolved =
+    resolvedAction === "confirm" ||
+    resolvedAction === "correct" ||
+    resolvedAction === "dismiss";
+
+  const severity = String(
+    flag.severity || "review"
+  ).toLowerCase();
+
+  const actionLabel =
+    resolvedAction === "confirm"
+      ? "Confirmed"
+      : resolvedAction === "correct"
+      ? "Corrected"
+      : resolvedAction === "dismiss"
+      ? "Dismissed"
+      : null;
+
+  function submitAction(
+    action: "confirm" | "correct" | "dismiss" | "clarify"
+  ) {
+    onAction(action, index, {
+      ...flag,
+      review_note: note,
+    });
+
+    setNoteOpen(false);
+    setNote("");
+  }
+
+  return (
+    <article
+      className={`rounded-[24px] border p-5 ${
+        resolved
+          ? "border-[#cbe0d3] bg-[#f8fcf9]"
+          : severity === "high" ||
+            severity === "critical" ||
+            severity === "error"
+          ? "border-[#efd7d7] bg-[#fff9f9]"
+          : "border-[#eaded9] bg-[#fbf7f4]"
+      }`}
+    >
+      <div className="flex flex-col gap-5 lg:flex-row lg:items-start lg:justify-between">
+        <div className="min-w-0 flex-1">
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="grid h-7 w-7 place-items-center rounded-lg bg-white text-[10px] font-semibold text-[#6a7770] shadow-sm">
+              {String(index + 1).padStart(2, "0")}
+            </span>
+
+            {flag.severity && (
+              <span
+                className={`rounded-full border px-2.5 py-1 text-[10px] font-semibold uppercase ${getSeverityClass(
+                  flag.severity
+                )}`}
+              >
+                {flag.severity}
+              </span>
+            )}
+
+            {flag.type && (
+              <span className="rounded-full border border-[#e0e7e2] bg-white px-2.5 py-1 text-[10px] font-medium text-[#68756e]">
+                {flag.type}
+              </span>
+            )}
+
+            {flag.medicine && (
+              <span className="text-xs font-medium text-[#695c57]">
+                {flag.medicine}
+              </span>
+            )}
+          </div>
+
+          <p className="mt-4 max-w-3xl text-sm leading-6 text-[#665b57]">
+            {flag.message ||
+              "Safety finding requires professional review."}
+          </p>
+
+          {resolved && (
+            <div className="mt-4 inline-flex items-center gap-2 rounded-full border border-[#cbe0d3] bg-[#edf8f1] px-3 py-1.5 text-[10px] font-semibold text-[#35664d]">
+              <span>✓</span>
+              {actionLabel}
             </div>
           )}
 
+          {resolvedAction && !resolved && (
+            <div className="mt-4 inline-flex items-center gap-2 rounded-full border border-[#eadcae] bg-[#fff7df] px-3 py-1.5 text-[10px] font-semibold text-[#8b6b2b]">
+              Clarification requested
+            </div>
+          )}
         </div>
-      )}
 
+        <div className="w-full lg:w-auto">
+          {!resolved && (
+            <div className="flex flex-col gap-2 lg:min-w-[290px]">
+              {noteOpen && (
+                <textarea
+                  value={note}
+                  onChange={(event) =>
+                    setNote(event.target.value)
+                  }
+                  placeholder="Optional review note..."
+                  rows={3}
+                  className="w-full resize-none rounded-2xl border border-[#d9e3dc] bg-white px-3 py-3 text-xs text-[#39473f] outline-none transition placeholder:text-[#a0aaa4] focus:border-[#8da798] focus:ring-2 focus:ring-[#eaf2ec]"
+                />
+              )}
+
+              <div className="flex flex-wrap gap-2">
+                <button
+                  disabled={busy}
+                  onClick={() => submitAction("confirm")}
+                  className="rounded-full bg-[#35664d] px-4 py-2.5 text-xs font-semibold text-white transition hover:bg-[#294f3d] disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  Confirm
+                </button>
+
+                <button
+                  disabled={busy}
+                  onClick={() => submitAction("correct")}
+                  className="rounded-full border border-[#cbd9d0] bg-white px-4 py-2.5 text-xs font-semibold text-[#496056] transition hover:bg-[#f5f8f5] disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  Correct
+                </button>
+
+                <button
+                  disabled={busy}
+                  onClick={() => submitAction("dismiss")}
+                  className="rounded-full border border-[#ead0d0] bg-white px-4 py-2.5 text-xs font-semibold text-[#9a5555] transition hover:bg-[#fff6f6] disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  Dismiss
+                </button>
+
+                <button
+                  disabled={busy}
+                  onClick={() => submitAction("clarify")}
+                  className="rounded-full border border-[#eadcae] bg-white px-4 py-2.5 text-xs font-semibold text-[#8b6b2b] transition hover:bg-[#fffaf0] disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  Clarify
+                </button>
+
+                <button
+                  disabled={busy}
+                  onClick={() =>
+                    setNoteOpen((open) => !open)
+                  }
+                  className="rounded-full border border-[#dce5df] bg-white px-4 py-2.5 text-xs font-medium text-[#69776f] transition hover:bg-[#f7f9f7] disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  {noteOpen ? "Hide note" : "Add note"}
+                </button>
+              </div>
+            </div>
+          )}
+        </div>
+      </div>
     </article>
   );
 }
@@ -546,6 +784,21 @@ export default function ReviewPage() {
 
   const [fileName, setFileName] = useState("");
 
+  const [review, setReview] =
+    useState<ReviewStatus | null>(null);
+
+  const [history, setHistory] =
+    useState<ReviewHistory | null>(null);
+
+  const [loadingReview, setLoadingReview] =
+    useState(false);
+
+  const [actionLoading, setActionLoading] =
+    useState(false);
+
+  const [error, setError] =
+    useState<string | null>(null);
+
   useEffect(() => {
     const storedResult =
       sessionStorage.getItem("prescription_review");
@@ -556,23 +809,299 @@ export default function ReviewPage() {
     if (storedResult) {
       try {
         const parsed = JSON.parse(storedResult);
-        Promise.resolve().then(() => setResult(parsed));
+        setResult(parsed);
       } catch {
-        Promise.resolve().then(() => setResult(null));
+        setResult(null);
       }
     }
 
     if (storedFileName) {
-      Promise.resolve().then(() => setFileName(storedFileName));
+      setFileName(storedFileName);
     }
   }, []);
 
+  const prescriptionId =
+    result?.prescription_id || "";
+
+  async function loadReviewState() {
+    if (!prescriptionId) return;
+
+    if (!isAuthenticated()) {
+      setError(
+        "Your pharmacist session is no longer active. Please sign in again."
+      );
+      return;
+    }
+
+    setLoadingReview(true);
+    setError(null);
+
+    try {
+      const [statusResponse, historyResponse] =
+        await Promise.all([
+          authFetch(
+            `/prescriptions/${encodeURIComponent(
+              prescriptionId
+            )}/review`
+          ),
+          authFetch(
+            `/prescriptions/${encodeURIComponent(
+              prescriptionId
+            )}/review/history`
+          ),
+        ]);
+
+      if (!statusResponse.ok) {
+        const body = await statusResponse
+          .json()
+          .catch(() => null);
+
+        throw new Error(
+          body?.detail ||
+            "Unable to load prescription review status."
+        );
+      }
+
+      if (!historyResponse.ok) {
+        const body = await historyResponse
+          .json()
+          .catch(() => null);
+
+        throw new Error(
+          body?.detail ||
+            "Unable to load review history."
+        );
+      }
+
+      const statusData =
+        (await statusResponse.json()) as ReviewStatus;
+
+      const historyData =
+        (await historyResponse.json()) as ReviewHistory;
+
+      setReview(statusData);
+      setHistory(historyData);
+    } catch (err) {
+      setError(
+        err instanceof Error
+          ? err.message
+          : "Unable to load review information."
+      );
+    } finally {
+      setLoadingReview(false);
+    }
+  }
+
+  useEffect(() => {
+    if (prescriptionId) {
+      void loadReviewState();
+    }
+  }, [prescriptionId]);
+
   function startNewReview() {
-    sessionStorage.removeItem("prescription_review");
-    sessionStorage.removeItem("prescription_file_name");
+    sessionStorage.removeItem(
+      "prescription_review"
+    );
+
+    sessionStorage.removeItem(
+      "prescription_file_name"
+    );
 
     window.location.href = "/";
   }
+
+  async function startReview() {
+    if (!prescriptionId) return;
+
+    setActionLoading(true);
+    setError(null);
+
+    try {
+      const response = await authFetch(
+        `/prescriptions/${encodeURIComponent(
+          prescriptionId
+        )}/review`,
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            action: "start_review",
+          }),
+        }
+      );
+
+      const body = await response
+        .json()
+        .catch(() => null);
+
+      if (!response.ok) {
+        throw new Error(
+          body?.detail ||
+            "Unable to start the prescription review."
+        );
+      }
+
+      setReview(body as ReviewStatus);
+
+      await loadReviewState();
+    } catch (err) {
+      setError(
+        err instanceof Error
+          ? err.message
+          : "Unable to start review."
+      );
+    } finally {
+      setActionLoading(false);
+    }
+  }
+
+  async function performFindingAction(
+    action:
+      | "confirm"
+      | "correct"
+      | "dismiss"
+      | "clarify",
+    index: number,
+    flag: SafetyFlag
+  ) {
+    if (!prescriptionId) return;
+
+    setActionLoading(true);
+    setError(null);
+
+    try {
+      const findingData = {
+        ...flag,
+      };
+
+      delete findingData.review_note;
+
+      const note =
+        typeof flag.review_note === "string"
+          ? flag.review_note
+          : undefined;
+
+      const response = await authFetch(
+        `/prescriptions/${encodeURIComponent(
+          prescriptionId
+        )}/review`,
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            action,
+            finding: {
+              finding_type: flag.type || "unknown",
+              finding_index: index,
+              finding_data: findingData,
+            },
+            note,
+          }),
+        }
+      );
+
+      const body = await response
+        .json()
+        .catch(() => null);
+
+      if (!response.ok) {
+        throw new Error(
+          body?.detail ||
+            `Unable to ${formatAction(
+              action
+            ).toLowerCase()} this finding.`
+        );
+      }
+
+      setReview(body as ReviewStatus);
+
+      await loadReviewState();
+    } catch (err) {
+      setError(
+        err instanceof Error
+          ? err.message
+          : "Unable to save review action."
+      );
+    } finally {
+      setActionLoading(false);
+    }
+  }
+
+  function getLatestFindingAction(
+    index: number
+  ): string | null {
+    const audits = history?.audits || [];
+
+    const relevant = audits
+      .filter(
+        (audit) =>
+          audit.finding_data?.finding_index ===
+          index
+      )
+      .sort(
+        (a, b) =>
+          new Date(a.created_at).getTime() -
+          new Date(b.created_at).getTime()
+      );
+
+    if (relevant.length === 0) {
+      return null;
+    }
+
+    return relevant[relevant.length - 1].action;
+  }
+
+  const medicines = Array.isArray(result?.medicines)
+    ? result.medicines
+    : [];
+
+  const safetyFlags = Array.isArray(
+    result?.safety_flags
+  )
+    ? result.safety_flags
+    : [];
+
+  const reviewCount = medicines.filter(
+    getReviewRequired
+  ).length;
+
+  const confidenceValues = medicines
+    .map(getOverallConfidence)
+    .filter((value) => value > 0);
+
+  const overallConfidence =
+    confidenceValues.length > 0
+      ? confidenceValues.reduce(
+          (sum, value) => sum + value,
+          0
+        ) / confidenceValues.length
+      : 0;
+
+  const unresolvedFindingCount =
+    useMemo(() => {
+      return safetyFlags.reduce(
+        (count, _, index) => {
+          const action =
+            getLatestFindingAction(index);
+
+          const resolved =
+            action === "confirm" ||
+            action === "correct" ||
+            action === "dismiss";
+
+          return resolved ? count : count + 1;
+        },
+        0
+      );
+    }, [safetyFlags, history]);
+
+  const isFinalized =
+    review?.review_status === "verified" ||
+    review?.review_status === "rejected";
 
   /* =======================================================
      EMPTY STATE
@@ -581,7 +1110,6 @@ export default function ReviewPage() {
   if (!result) {
     return (
       <main className="relative min-h-screen overflow-hidden bg-[#f1f5f2] text-[#17211d]">
-
         <div className="pointer-events-none absolute inset-0">
           <div
             className="absolute inset-0 bg-cover bg-center"
@@ -597,9 +1125,7 @@ export default function ReviewPage() {
         </div>
 
         <nav className="relative z-10 border-b border-[#dbe5df]/80 bg-white/70 backdrop-blur-xl">
-
           <div className="mx-auto flex max-w-7xl items-center justify-between px-6 py-5 lg:px-10">
-
             <Link
               href="/"
               className="flex items-center gap-3"
@@ -625,19 +1151,13 @@ export default function ReviewPage() {
               <span className="text-[#b2bbb6]">·</span>
               Human review
             </div>
-
           </div>
-
         </nav>
 
         <section className="relative z-10 mx-auto flex min-h-[calc(100vh-81px)] max-w-7xl items-center justify-center px-6 py-20 lg:px-10">
-
           <div className="w-full max-w-2xl">
-
             <div className="rounded-[32px] border border-white/80 bg-white/85 p-3 shadow-[0_30px_100px_rgba(30,45,38,0.12)] backdrop-blur-xl">
-
               <div className="rounded-[26px] border border-[#e0e8e2] bg-[#f5f8f5]/90 px-7 py-12 text-center sm:px-12 sm:py-16">
-
                 <div className="mx-auto grid h-16 w-16 place-items-center rounded-2xl border border-[#d9e5dc] bg-white text-sm font-semibold text-[#60766a] shadow-sm">
                   Rx
                 </div>
@@ -652,9 +1172,9 @@ export default function ReviewPage() {
                 </h1>
 
                 <p className="mx-auto mt-5 max-w-lg text-sm leading-7 text-[#737f78] sm:text-base">
-                  Upload a prescription from the pharmacy workspace
-                  to begin a structured review of the extracted
-                  medicine information.
+                  Upload a prescription from the pharmacy
+                  workspace to begin a structured review of
+                  the extracted medicine information.
                 </p>
 
                 <div className="mt-9">
@@ -668,7 +1188,6 @@ export default function ReviewPage() {
                 </div>
 
                 <div className="mx-auto mt-12 flex max-w-md items-center justify-center gap-3 text-[10px] font-semibold uppercase tracking-[0.13em] text-[#89958e] sm:gap-5">
-
                   {[
                     ["01", "Upload"],
                     ["02", "Extract"],
@@ -693,42 +1212,33 @@ export default function ReviewPage() {
                       )}
                     </div>
                   ))}
-
                 </div>
 
                 <div className="mx-auto mt-10 max-w-lg border-t border-[#dfe7e2] pt-6">
                   <p className="text-[11px] leading-5 text-[#8b9690]">
-                    Prescription Intelligence is designed to support
-                    pharmacy and healthcare workflows. AI-generated
-                    information should always remain subject to
-                    professional review.
+                    Prescription Intelligence is designed to
+                    support pharmacy and healthcare workflows.
+                    AI-generated information should always remain
+                    subject to professional review.
                   </p>
                 </div>
-
               </div>
             </div>
-
           </div>
-
         </section>
 
         <footer className="relative z-10 border-t border-[#dce5df]/80 bg-white/60 px-6 py-7 backdrop-blur-xl lg:px-10">
-
           <div className="mx-auto flex max-w-7xl flex-col gap-2 text-xs text-[#8a948f] sm:flex-row sm:items-center sm:justify-between">
-
             <span>
-              Prescription Intelligence · Medication intelligence
-              platform
+              Prescription Intelligence · Medication
+              intelligence platform
             </span>
 
             <span>
               AI-assisted · Evidence-aware · Human-reviewed
             </span>
-
           </div>
-
         </footer>
-
       </main>
     );
   }
@@ -737,38 +1247,10 @@ export default function ReviewPage() {
      ACTIVE REVIEW
      ======================================================= */
 
-  const medicines = Array.isArray(result.medicines)
-    ? result.medicines
-    : [];
-
-  const safetyFlags = Array.isArray(result.safety_flags)
-    ? result.safety_flags
-    : [];
-
-  const reviewCount = medicines.filter(
-    getReviewRequired
-  ).length;
-
-  const confidenceValues = medicines
-    .map(getOverallConfidence)
-    .filter((value) => value > 0);
-
-  const overallConfidence =
-    confidenceValues.length > 0
-      ? confidenceValues.reduce(
-          (sum, value) => sum + value,
-          0
-        ) / confidenceValues.length
-      : 0;
-
   return (
     <main className="min-h-screen bg-[#f2f6f3] text-[#17211d]">
-
-      {/* NAVIGATION */}
       <nav className="sticky top-0 z-30 border-b border-[#dce5df] bg-white/90 backdrop-blur-xl">
-
         <div className="mx-auto flex max-w-7xl items-center justify-between px-6 py-4 lg:px-10">
-
           <Link
             href="/"
             className="flex items-center gap-3"
@@ -794,20 +1276,14 @@ export default function ReviewPage() {
             <span className="text-[#b2bbb6]">·</span>
             Human review
           </div>
-
         </div>
-
       </nav>
 
-      {/* PAGE HEADER */}
-      <section className="mx-auto max-w-7xl px-6 pb-8 pt-10 lg:px-10">
-
+      {/* HEADER */}
+      <section className="mx-auto max-w-7xl px-6 pb-7 pt-10 lg:px-10">
         <div className="flex flex-col gap-7 lg:flex-row lg:items-end lg:justify-between">
-
           <div>
-
             <div className="flex items-center gap-2 text-xs font-medium text-[#718079]">
-
               <span className="grid h-7 w-7 place-items-center rounded-lg bg-white text-[10px] text-[#60766a] shadow-sm">
                 Rx
               </span>
@@ -816,20 +1292,18 @@ export default function ReviewPage() {
 
               <span className="text-[#b5bdb8]">·</span>
 
-              {result.prescription_id || "Unknown ID"}
-
+              {prescriptionId || "Unknown ID"}
             </div>
 
             <h1 className="mt-5 max-w-3xl text-4xl font-semibold tracking-[-0.05em] sm:text-5xl">
-              Review the extracted information.
+              Review the prescription.
             </h1>
 
             <p className="mt-4 max-w-2xl text-sm leading-7 text-[#737d78]">
-              Review the OCR evidence, normalized medicine
-              information, intelligence confidence, and safety
-              findings before moving the prescription forward.
+              Verify the extracted medicine information and
+              resolve safety findings before completing the
+              pharmacist review.
             </p>
-
           </div>
 
           <button
@@ -838,77 +1312,169 @@ export default function ReviewPage() {
           >
             + New prescription
           </button>
-
         </div>
+      </section>
 
+      {/* ERROR */}
+      {error && (
+        <section className="mx-auto max-w-7xl px-6 lg:px-10">
+          <div className="rounded-2xl border border-[#efcece] bg-[#fff5f5] px-5 py-4 text-sm text-[#944949]">
+            <div className="font-semibold">
+              Review action could not be completed
+            </div>
+
+            <div className="mt-1 text-xs leading-5">
+              {error}
+            </div>
+          </div>
+        </section>
+      )}
+
+      {/* REVIEW STATUS */}
+      <section className="mx-auto max-w-7xl px-6 pt-5 lg:px-10">
+        <div className="rounded-[28px] border border-[#dce6df] bg-white p-5 shadow-[0_12px_40px_rgba(30,45,38,0.05)]">
+          <div className="flex flex-col gap-5 lg:flex-row lg:items-center lg:justify-between">
+            <div className="flex items-start gap-4">
+              <div
+                className={`grid h-11 w-11 shrink-0 place-items-center rounded-xl ${
+                  review?.review_status === "verified"
+                    ? "bg-[#edf8f1] text-[#35664d]"
+                    : review?.review_status === "rejected"
+                    ? "bg-[#fff0f0] text-[#a74646]"
+                    : "bg-[#fff7df] text-[#a47b2c]"
+                }`}
+              >
+                {review?.review_status === "verified"
+                  ? "✓"
+                  : review?.review_status === "rejected"
+                  ? "!"
+                  : "•"}
+              </div>
+
+              <div>
+                <div className="text-[9px] font-semibold uppercase tracking-[0.16em] text-[#929c97]">
+                  Prescription review status
+                </div>
+
+                <div className="mt-1 flex flex-wrap items-center gap-3">
+                  <h2 className="text-xl font-semibold tracking-[-0.02em]">
+                    {loadingReview
+                      ? "Loading..."
+                      : formatReviewStatus(
+                          review?.review_status
+                        )}
+                  </h2>
+
+                  {review && (
+                    <span className="rounded-full border border-[#dce5df] bg-[#f7f9f7] px-3 py-1 text-[10px] font-medium text-[#68766f]">
+                      {review.high_priority_findings}{" "}
+                      high-priority unresolved
+                    </span>
+                  )}
+                </div>
+
+                <p className="mt-1 text-xs text-[#7d8983]">
+                  {review?.review_status === "verified"
+                    ? "Pharmacist review has been completed."
+                    : review?.review_status ===
+                      "needs_clarification"
+                    ? "Additional clarification is required before this review can be completed."
+                    : review?.review_status ===
+                      "rejected"
+                    ? "The prescription review was rejected."
+                    : "AI findings remain subject to pharmacist verification."}
+                </p>
+              </div>
+            </div>
+
+            {!isFinalized &&
+              review?.review_status === "pending" && (
+                <button
+                  disabled={actionLoading}
+                  onClick={startReview}
+                  className="rounded-full bg-[#17211d] px-5 py-3 text-sm font-medium text-white transition hover:bg-[#26332d] disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  {actionLoading
+                    ? "Starting..."
+                    : "Start pharmacist review"}
+                </button>
+              )}
+          </div>
+
+          {review?.reviewer && (
+            <div className="mt-5 border-t border-[#e4eae6] pt-5">
+              <div className="flex flex-col gap-2 text-xs text-[#7d8983] sm:flex-row sm:items-center sm:justify-between">
+                <span>
+                  Last action by{" "}
+                  <strong className="font-semibold text-[#526158]">
+                    {review.reviewer.name ||
+                      review.reviewer.email ||
+                      "Pharmacist"}
+                  </strong>
+                </span>
+
+                {review.reviewed_at && (
+                  <span>
+                    {new Date(review.reviewed_at).toLocaleString()}
+                  </span>
+                )}
+              </div>
+            </div>
+          )}
+        </div>
       </section>
 
       {/* SUMMARY */}
-      <section className="mx-auto max-w-7xl px-6 lg:px-10">
+      <section className="mx-auto max-w-7xl px-6 pt-5 lg:px-10">
+        <div className="grid gap-4 md:grid-cols-4">
+          {[
+            [
+              "Medicines detected",
+              medicines.length.toString(),
+              "Normalized medicine candidates",
+            ],
+            [
+              "Confidence",
+              formatConfidence(
+                overallConfidence
+              ),
+              "Average medicine confidence",
+            ],
+            [
+              "Safety findings",
+              safetyFlags.length.toString(),
+              "Original AI findings preserved",
+            ],
+            [
+              "Unresolved",
+              unresolvedFindingCount.toString(),
+              "Findings requiring pharmacist attention",
+            ],
+          ].map(([label, value, description]) => (
+            <div
+              key={label}
+              className="rounded-3xl border border-[#dce6df] bg-white p-5 shadow-[0_10px_35px_rgba(30,45,38,0.04)]"
+            >
+              <div className="text-[9px] font-semibold uppercase tracking-[0.16em] text-[#929c97]">
+                {label}
+              </div>
 
-        <div className="grid gap-4 md:grid-cols-3">
+              <div className="mt-3 text-3xl font-semibold tracking-[-0.04em]">
+                {value}
+              </div>
 
-          <div className="rounded-3xl border border-[#dce6df] bg-white p-5 shadow-[0_10px_35px_rgba(30,45,38,0.04)]">
-
-            <div className="text-[9px] font-semibold uppercase tracking-[0.16em] text-[#929c97]">
-              Medicines detected
+              <div className="mt-1 text-xs text-[#7e8983]">
+                {description}
+              </div>
             </div>
-
-            <div className="mt-3 text-3xl font-semibold tracking-[-0.04em]">
-              {medicines.length}
-            </div>
-
-            <div className="mt-1 text-xs text-[#7e8983]">
-              Normalized medicine candidates
-            </div>
-
-          </div>
-
-          <div className="rounded-3xl border border-[#dce6df] bg-white p-5 shadow-[0_10px_35px_rgba(30,45,38,0.04)]">
-
-            <div className="text-[9px] font-semibold uppercase tracking-[0.16em] text-[#929c97]">
-              Intelligence confidence
-            </div>
-
-            <div className="mt-3 text-3xl font-semibold tracking-[-0.04em]">
-              {formatConfidence(overallConfidence)}
-            </div>
-
-            <div className="mt-1 text-xs text-[#7e8983]">
-              Average medicine confidence
-            </div>
-
-          </div>
-
-          <div className="rounded-3xl border border-[#dce6df] bg-white p-5 shadow-[0_10px_35px_rgba(30,45,38,0.04)]">
-
-            <div className="text-[9px] font-semibold uppercase tracking-[0.16em] text-[#929c97]">
-              Review queue
-            </div>
-
-            <div className="mt-3 text-3xl font-semibold tracking-[-0.04em]">
-              {reviewCount}
-            </div>
-
-            <div className="mt-1 text-xs text-[#7e8983]">
-              {reviewCount === 0
-                ? "No medicine requires additional review"
-                : "Medicine candidates need attention"}
-            </div>
-
-          </div>
-
+          ))}
         </div>
-
       </section>
 
       {/* PRESCRIPTION META */}
       <section className="mx-auto max-w-7xl px-6 pt-5 lg:px-10">
-
         <div className="rounded-3xl border border-[#dce6df] bg-white p-5 shadow-[0_12px_40px_rgba(30,45,38,0.05)]">
-
           <div className="grid gap-5 md:grid-cols-3">
-
             <div>
               <div className="text-[9px] font-semibold uppercase tracking-[0.16em] text-[#929c97]">
                 File
@@ -927,7 +1493,7 @@ export default function ReviewPage() {
               </div>
 
               <div className="mt-2 font-mono text-xs text-[#596861]">
-                {result.prescription_id || "—"}
+                {prescriptionId || "—"}
               </div>
             </div>
 
@@ -937,33 +1503,24 @@ export default function ReviewPage() {
               </div>
 
               <div className="mt-2 flex items-center gap-2 text-sm font-medium">
-
                 <span className="h-2 w-2 rounded-full bg-[#668474]" />
 
                 {result.status
                   ? result.status.charAt(0).toUpperCase() +
                     result.status.slice(1)
                   : "Processed"}
-
               </div>
             </div>
-
           </div>
-
         </div>
-
       </section>
 
       {/* MAIN WORKSPACE */}
       <section className="mx-auto max-w-7xl px-6 py-8 lg:px-10">
-
         <div className="grid gap-6 lg:grid-cols-[0.85fr_1.35fr]">
-
-          {/* OCR EVIDENCE */}
+          {/* OCR */}
           <div className="h-fit rounded-3xl border border-[#dce6df] bg-white p-6 shadow-[0_12px_40px_rgba(30,45,38,0.05)] lg:sticky lg:top-24">
-
             <div className="flex items-start justify-between gap-4">
-
               <div>
                 <div className="text-[9px] font-semibold uppercase tracking-[0.16em] text-[#929c97]">
                   OCR evidence
@@ -977,22 +1534,17 @@ export default function ReviewPage() {
               <span className="rounded-full bg-[#edf3ee] px-3 py-1.5 text-[10px] font-medium text-[#61766a]">
                 Evidence
               </span>
-
             </div>
 
             <div className="mt-5 max-h-[560px] overflow-auto rounded-2xl border border-[#e1e8e3] bg-[#f7f9f7] p-5">
-
               <p className="whitespace-pre-wrap text-sm leading-7 text-[#58655e]">
                 {result.raw_text ||
                   "No OCR text returned."}
               </p>
-
             </div>
 
             <div className="mt-4 rounded-2xl bg-[#f3f7f4] p-4">
-
               <div className="flex items-start gap-3">
-
                 <span className="grid h-7 w-7 shrink-0 place-items-center rounded-lg bg-white text-xs text-[#60766a]">
                   i
                 </span>
@@ -1002,18 +1554,13 @@ export default function ReviewPage() {
                   not be treated as a final clinical
                   interpretation.
                 </p>
-
               </div>
-
             </div>
-
           </div>
 
-          {/* MEDICINE INTELLIGENCE */}
+          {/* MEDICINES */}
           <div>
-
             <div className="mb-5 flex items-end justify-between">
-
               <div>
                 <div className="text-[9px] font-semibold uppercase tracking-[0.16em] text-[#929c97]">
                   Medicine intelligence
@@ -1030,152 +1577,182 @@ export default function ReviewPage() {
                   ? "candidate"
                   : "candidates"}
               </span>
-
             </div>
 
             {medicines.length === 0 ? (
-
               <div className="rounded-3xl border border-dashed border-[#ccd9d1] bg-white p-12 text-center text-sm text-[#7b8780]">
                 No medicine candidates were returned.
               </div>
-
             ) : (
-
               <div className="space-y-4">
-
-                {medicines.map((medicine, index) => (
-                  <MedicineCard
-                    key={`${medicine.name}-${index}`}
-                    medicine={medicine}
-                    index={index}
-                  />
-                ))}
-
+                {medicines.map(
+                  (medicine, index) => (
+                    <MedicineCard
+                      key={`${medicine.name}-${index}`}
+                      medicine={medicine}
+                      index={index}
+                    />
+                  )
+                )}
               </div>
-
             )}
-
           </div>
-
         </div>
 
-        {/* SAFETY INTELLIGENCE */}
+        {/* SAFETY REVIEW */}
         <div className="mt-6 rounded-3xl border border-[#dce6df] bg-white p-6 shadow-[0_12px_40px_rgba(30,45,38,0.05)]">
-
-          <div className="flex items-start gap-4">
-
-            <span
-              className={`grid h-10 w-10 shrink-0 place-items-center rounded-xl ${
-                safetyFlags.length === 0
-                  ? "bg-[#edf3ee] text-[#60766a]"
-                  : "bg-[#f8ece8] text-[#8a6258]"
-              }`}
-            >
-              {safetyFlags.length === 0 ? "✓" : "!"}
-            </span>
-
+          <div className="flex flex-col gap-2 sm:flex-row sm:items-end sm:justify-between">
             <div>
-
               <div className="text-[9px] font-semibold uppercase tracking-[0.16em] text-[#929c97]">
-                Safety intelligence
+                Pharmacist review
               </div>
 
-              <h2 className="mt-1 text-xl font-semibold">
-                Review findings
+              <h2 className="mt-2 text-2xl font-semibold tracking-[-0.03em]">
+                Safety findings
               </h2>
 
+              <p className="mt-2 max-w-2xl text-xs leading-5 text-[#7c8881]">
+                Each finding is reviewed independently. Original
+                AI findings remain preserved for auditability.
+              </p>
             </div>
 
+            <span className="rounded-full bg-[#fff7df] px-3 py-1.5 text-[10px] font-semibold text-[#8b6b2b]">
+              {unresolvedFindingCount} unresolved
+            </span>
           </div>
 
           {safetyFlags.length === 0 ? (
-
             <div className="mt-5 rounded-2xl bg-[#f3f7f4] p-5">
-
               <div className="text-sm font-semibold text-[#52635a]">
                 No safety flags were returned.
               </div>
 
               <p className="mt-1 text-xs leading-5 text-[#7d8983]">
-                This does not mean the prescription is
-                clinically cleared. Professional review remains
-                required.
+                This does not mean the prescription is clinically
+                cleared. Professional review remains required.
               </p>
-
             </div>
-
           ) : (
-
             <div className="mt-5 space-y-3">
-
-              {safetyFlags.map((flag, index) => (
-                <div
-                  key={index}
-                  className="rounded-2xl border border-[#eaded9] bg-[#fbf6f3] p-5"
-                >
-
-                  <div className="flex flex-wrap items-center gap-2">
-
-                    {flag.severity && (
-                      <span className="rounded-full bg-[#f4e5df] px-2.5 py-1 text-[10px] font-semibold uppercase text-[#825f55]">
-                        {flag.severity}
-                      </span>
+              {safetyFlags.map(
+                (flag, index) => (
+                  <FindingCard
+                    key={`${flag.type}-${index}`}
+                    flag={flag}
+                    index={index}
+                    resolvedAction={getLatestFindingAction(
+                      index
                     )}
-
-                    {flag.type && (
-                      <span className="rounded-full bg-white px-2.5 py-1 text-[10px] font-medium text-[#776a65]">
-                        {flag.type}
-                      </span>
-                    )}
-
-                    {flag.medicine && (
-                      <span className="text-xs font-medium text-[#695c57]">
-                        {flag.medicine}
-                      </span>
-                    )}
-
-                  </div>
-
-                  <p className="mt-3 text-sm leading-6 text-[#765f58]">
-                    {flag.message ||
-                      "Safety finding requires review."}
-                  </p>
-
-                </div>
-              ))}
-
+                    busy={actionLoading}
+                    onAction={performFindingAction}
+                  />
+                )
+              )}
             </div>
-
           )}
-
         </div>
 
-        {/* HUMAN REVIEW */}
+        {/* AUDIT HISTORY */}
+        <div className="mt-6 rounded-3xl border border-[#dce6df] bg-white p-6 shadow-[0_12px_40px_rgba(30,45,38,0.05)]">
+          <div>
+            <div className="text-[9px] font-semibold uppercase tracking-[0.16em] text-[#929c97]">
+              Audit trail
+            </div>
+
+            <h2 className="mt-2 text-xl font-semibold">
+              Review history
+            </h2>
+          </div>
+
+          {history?.audits &&
+          history.audits.length > 0 ? (
+            <div className="mt-5 space-y-3">
+              {[...history.audits]
+                .reverse()
+                .map((audit) => (
+                  <div
+                    key={audit.id}
+                    className="rounded-2xl border border-[#e3e9e5] bg-[#f9fbf9] p-4"
+                  >
+                    <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <span className="rounded-full bg-white px-2.5 py-1 text-[10px] font-semibold text-[#526158]">
+                          {formatAction(
+                            audit.action
+                          )}
+                        </span>
+
+                        {audit.finding_type && (
+                          <span className="rounded-full border border-[#dce5df] bg-white px-2.5 py-1 text-[10px] text-[#718079]">
+                            {audit.finding_type}
+                          </span>
+                        )}
+
+                        {typeof audit.finding_data
+                          ?.finding_index ===
+                          "number" && (
+                          <span className="text-[10px] text-[#8a948f]">
+                            Finding #
+                            {audit.finding_data
+                              .finding_index + 1}
+                          </span>
+                        )}
+                      </div>
+
+                      <span className="text-[10px] text-[#8a948f]">
+                        {formatTimestamp(
+                          audit.created_at
+                        )}
+                      </span>
+                    </div>
+
+                    <div className="mt-3 text-xs text-[#7b8780]">
+                      {formatReviewStatus(
+                        audit.previous_status
+                      )}{" "}
+                      →{" "}
+                      {formatReviewStatus(
+                        audit.new_status
+                      )}
+                    </div>
+
+                    {audit.note && (
+                      <div className="mt-3 rounded-xl bg-white p-3 text-xs leading-5 text-[#69766f]">
+                        {audit.note}
+                      </div>
+                    )}
+                  </div>
+                ))}
+            </div>
+          ) : (
+            <div className="mt-5 rounded-2xl border border-dashed border-[#d4dfd8] bg-[#fafcfb] p-6 text-center text-xs text-[#87928c]">
+              No pharmacist review actions have been recorded
+              yet.
+            </div>
+          )}
+        </div>
+
+        {/* HUMAN REVIEW BANNER */}
         <div className="mt-6 rounded-3xl border border-[#d7e3db] bg-[#eaf2ec] p-6">
-
           <div className="flex flex-col gap-5 sm:flex-row sm:items-center sm:justify-between">
-
             <div className="flex items-start gap-3">
-
               <span className="grid h-9 w-9 shrink-0 place-items-center rounded-xl bg-white text-xs text-[#60766a] shadow-sm">
                 i
               </span>
 
               <div>
-
                 <div className="text-sm font-semibold text-[#4f6257]">
                   Human verification remains in the loop
                 </div>
 
                 <p className="mt-1 max-w-2xl text-xs leading-5 text-[#718078]">
-                  OCR and AI-generated medicine information are
-                  supporting evidence. A qualified professional
-                  should verify the prescription before clinical
-                  use.
+                  AI-generated medicine and safety information is
+                  supporting evidence. A qualified pharmacist
+                  remains responsible for reviewing the original
+                  prescription and recorded findings.
                 </p>
-
               </div>
-
             </div>
 
             <button
@@ -1184,18 +1761,12 @@ export default function ReviewPage() {
             >
               New prescription
             </button>
-
           </div>
-
         </div>
-
       </section>
 
-      {/* FOOTER */}
       <footer className="border-t border-[#dce5df] bg-white px-6 py-7 lg:px-10">
-
         <div className="mx-auto flex max-w-7xl flex-col gap-2 text-xs text-[#8a948f] sm:flex-row sm:items-center sm:justify-between">
-
           <span>
             Prescription Intelligence · Medication intelligence
             platform
@@ -1204,11 +1775,8 @@ export default function ReviewPage() {
           <span>
             AI-assisted · Evidence-aware · Human-reviewed
           </span>
-
         </div>
-
       </footer>
-
     </main>
   );
 }

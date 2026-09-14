@@ -7,6 +7,7 @@ from uuid import uuid4
 from PIL import Image
 
 from backend.routers import (
+    admin,
     auth,
     users,
     reviews,
@@ -101,7 +102,7 @@ app.include_router(auth.router)
 app.include_router(users.router)
 app.include_router(reviews.router)
 app.include_router(customers.router)
-
+app.include_router(admin.router)
 
 # =========================================================
 # STATIC UPLOADS
@@ -305,7 +306,7 @@ def get_dashboard_stats(
                 PrescriptionDB.safety_flags.isnot(
                     None
                 ),
-                func.jsonb_array_length(
+                func.json_array_length(
                     PrescriptionDB.safety_flags
                 ) > 0,
             ).with_entities(
@@ -314,6 +315,7 @@ def get_dashboard_stats(
         ) or 0
 
     except Exception:
+        db.rollback()
         prescriptions_with_flags = 0
 
     # -----------------------------------------------------
