@@ -678,6 +678,26 @@ class TestNoisyHandwrittenPipeline:
         result = process_prescription("Pantoprazole 40mg once daily")
         assert len(result["medicines"]) == 1
 
+    def test_prescription_advice_is_not_attached_to_medicine(self):
+        """
+        Prescription-level advice must not be absorbed into
+        medicine-specific instructions.
+        """
+        result = process_prescription(
+            "Pantop 40 mg\n"
+            "Instructions: Take 1 tablet once daily before breakfast for 5 days.\n"
+            "Advice: Take medicines as directed."
+        )
+
+        assert len(result["medicines"]) == 1
+
+        instructions = result["medicines"][0]["instructions"]
+
+        assert instructions == (
+            "Take 1 tablet once daily before breakfast for 5 days."
+        )
+        assert "Advice: Take medicines as directed." not in instructions
+
     def test_printed_tab_prefix_unchanged(self):
         """Existing Tab-prefixed path must still work after the change."""
         result = process_prescription("Tab Paracetamol 500mg twice daily")

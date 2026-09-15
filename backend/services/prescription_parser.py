@@ -519,6 +519,7 @@ def _is_non_medicine_line(line: str) -> bool:
         r"^rx\s*:?",
         r"^treatment\s*:?",
         r"^general\s+advice\s*:?",
+        r"^advice\s*:?",
         r"^follow[\-\s]?up\s*:?",
         r"^assessment\s*:?",
         r"^clinical\s+information\s*:?",
@@ -743,7 +744,7 @@ def _split_prescription_blocks(
             # -------------------------------------------------
 
             if re.match(
-                r"^(general\s+advice|follow[\-\s]?up|"
+                r"^(general\s+advice|advice|follow[\-\s]?up|"
                 r"assessment|clinical\s+information|"
                 r"chief\s+complaints?|weight|blood\s+pressure|"
                 r"pulse)\s*:?",
