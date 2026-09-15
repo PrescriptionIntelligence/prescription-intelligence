@@ -3,6 +3,7 @@ from pydantic import (
     EmailStr,
     Field,
     field_validator,
+    model_validator,
 )
 from typing import Any, Optional
 from uuid import UUID
@@ -131,8 +132,11 @@ class PrescriptionResponse(BaseModel):
     )
 
     file_name: Optional[str] = None
-    file_path: Optional[str] = None
     file_type: Optional[str] = None
+    # has_image indicates whether a prescription image is
+    # available via GET /prescriptions/{id}/image.
+    # The internal filesystem path is never returned.
+    has_image: bool = False
 
     created_at: datetime
     updated_at: Optional[datetime] = None
@@ -145,14 +149,43 @@ class PrescriptionResponse(BaseModel):
         "from_attributes": True
     }
 
+    @model_validator(mode="before")
+    @classmethod
+    def _derive_has_image(cls, data: Any) -> Any:
+        """
+        Derive has_image from file_path on the ORM object.
+        file_path itself is not included in the schema so
+        the filesystem path is never serialised to clients.
+        """
+        if not isinstance(data, dict):
+            # ORM instance — project to a plain dict so
+            # Pydantic never sees file_path as a schema field
+            return {
+                "id": data.id,
+                "prescription_id": data.prescription_id,
+                "raw_text": data.raw_text,
+                "status": data.status,
+                "safety_flags": data.safety_flags or [],
+                "file_name": data.file_name,
+                "file_type": data.file_type,
+                "has_image": bool(data.file_path),
+                "created_at": data.created_at,
+                "updated_at": data.updated_at,
+                "medicines": list(data.medicines),
+            }
+        # dict input: has_image may already be set;
+        # default False is applied by the field definition
+        return data
+
 
 class PrescriptionUploadResponse(BaseModel):
     message: str
     prescription_id: str
     file_name: str
     file_type: str
-    file_path: str
-    stored_filename: Optional[str] = None
+    # file_path and stored_filename are intentionally
+    # omitted — internal filesystem paths must not be
+    # returned to clients.
     status: str
     raw_text: Optional[str] = None
 

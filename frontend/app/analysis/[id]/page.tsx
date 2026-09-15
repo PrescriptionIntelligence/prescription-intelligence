@@ -60,8 +60,9 @@ type Prescription = {
   status: string;
   safety_flags: SafetyFlag[];
   file_name: string | null;
-  file_path: string | null;
   file_type: string | null;
+  /** True when an image is available via the authenticated image endpoint. */
+  has_image: boolean;
   created_at: string;
   updated_at: string | null;
   medicines: Medicine[];
@@ -404,10 +405,10 @@ export default function AnalysisDetailPage() {
               data.safety_flags || [],
             file_name:
               data.file_name,
-            file_path:
-              data.file_path,
             file_type:
               data.file_type,
+            has_image:
+              Boolean(data.has_image),
             created_at:
               new Date().toISOString(),
             updated_at:
@@ -464,7 +465,7 @@ export default function AnalysisDetailPage() {
   // -------------------------------------------------------
 
   useEffect(() => {
-    if (!prescriptionId || !prescription?.file_path) {
+    if (!prescriptionId || !prescription?.has_image) {
       return;
     }
 
@@ -494,7 +495,7 @@ export default function AnalysisDetailPage() {
         URL.revokeObjectURL(objectUrl);
       }
     };
-  }, [prescriptionId, prescription?.file_path]);
+  }, [prescriptionId, prescription?.has_image]);
 
   // -------------------------------------------------------
   // Loading

@@ -2672,6 +2672,177 @@ class TestPrescriptionImageEndpoint:
         assert response.status_code == 404
 
 
+
+class TestFilesystemPathNotExposed:
+    """
+    Regression tests confirming that internal filesystem paths
+    (file_path, stored_filename) are never returned in public
+    prescription API responses.
+
+    The authenticated image endpoint continues to serve images
+    correctly; this class only verifies that the raw server path
+    is absent from serialised JSON responses.
+    """
+
+    def test_prescription_response_has_no_file_path(
+        self,
+        test_app,
+        prescription_access_scenario,
+    ):
+        """GET /prescriptions/{id} must not include file_path."""
+        scenario = prescription_access_scenario
+
+        token = _login_for_access_test(
+            test_app,
+            "access-pharmacist-a@example.com",
+            "password-a",
+        )
+
+        response = test_app.get(
+            f"/prescriptions/{scenario['prescription_a'].prescription_id}",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+        assert response.status_code == 200
+        body = response.json()
+        assert "file_path" not in body, (
+            "file_path must not appear in PrescriptionResponse"
+        )
+        assert "stored_filename" not in body, (
+            "stored_filename must not appear in PrescriptionResponse"
+        )
+
+    def test_prescription_response_has_has_image_field(
+        self,
+        test_app,
+        prescription_access_scenario,
+    ):
+        """
+        PrescriptionResponse must include has_image (bool).
+        For a prescription with no stored image it must be False.
+        """
+        scenario = prescription_access_scenario
+
+        token = _login_for_access_test(
+            test_app,
+            "access-pharmacist-a@example.com",
+            "password-a",
+        )
+
+        response = test_app.get(
+            f"/prescriptions/{scenario['prescription_a'].prescription_id}",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+        assert response.status_code == 200
+        body = response.json()
+        assert "has_image" in body, (
+            "has_image must be present in PrescriptionResponse"
+        )
+        assert body["has_image"] is False
+
+    def test_prescription_response_has_image_true_when_file_stored(
+        self,
+        test_app,
+        prescription_access_scenario,
+        auth_db_session,
+    ):
+        """
+        has_image must be True when the prescription has a file_path
+        stored in the database.
+        """
+        import backend.main as main_module
+
+        image_file = main_module.UPLOAD_DIR / "test-has-image-flag.jpg"
+        image_file.write_bytes(b"FAKE")
+
+        try:
+            scenario = prescription_access_scenario
+            rx = scenario["prescription_a"]
+
+            auth_db_session.query(PrescriptionDB).filter(
+                PrescriptionDB.prescription_id == rx.prescription_id
+            ).update({"file_path": str(image_file)})
+            auth_db_session.commit()
+
+            token = _login_for_access_test(
+                test_app,
+                "access-pharmacist-a@example.com",
+                "password-a",
+            )
+
+            response = test_app.get(
+                f"/prescriptions/{rx.prescription_id}",
+                headers={"Authorization": f"Bearer {token}"},
+            )
+
+            assert response.status_code == 200
+            body = response.json()
+            assert body["has_image"] is True
+            assert "file_path" not in body
+
+        finally:
+            auth_db_session.query(PrescriptionDB).filter(
+                PrescriptionDB.prescription_id == rx.prescription_id
+            ).update({"file_path": None})
+            auth_db_session.commit()
+            if image_file.exists():
+                image_file.unlink()
+
+    def test_admin_review_list_has_no_file_path(
+        self,
+        test_app,
+        prescription_access_scenario,
+    ):
+        """GET /admin/reviews must not include file_path in list items."""
+        token = _login_for_access_test(
+            test_app,
+            "access-admin@example.com",
+            "password-admin",
+        )
+
+        response = test_app.get(
+            "/admin/reviews",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+        assert response.status_code == 200
+        data = response.json()
+        items = data.get("items", data if isinstance(data, list) else [])
+
+        for item in items:
+            assert "file_path" not in item, (
+                f"file_path leaked in admin review list item: {item.get('prescription_id')}"
+            )
+
+    def test_admin_review_detail_has_no_file_path(
+        self,
+        test_app,
+        prescription_access_scenario,
+    ):
+        """GET /admin/reviews/{id} must not include file_path."""
+        scenario = prescription_access_scenario
+
+        token = _login_for_access_test(
+            test_app,
+            "access-admin@example.com",
+            "password-admin",
+        )
+
+        response = test_app.get(
+            f"/admin/reviews/{scenario['prescription_a'].prescription_id}",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+        assert response.status_code == 200
+        body = response.json()
+        assert "file_path" not in body, (
+            "file_path must not appear in admin review detail response"
+        )
+        assert "stored_filename" not in body
+
+
+
 class TestPrescriptionExtractionAudit:
     """
     Production-oriented regression coverage for prescription

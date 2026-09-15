@@ -163,7 +163,6 @@ def serialize_prescription(
             or "pending"
         ),
         "file_name": prescription.file_name,
-        "file_path": prescription.file_path,
         "raw_text": prescription.raw_text,
         "organization": (
             {
@@ -1146,7 +1145,6 @@ def list_admin_reviews(
                     else None
                 ),
                 "review_notes": prescription.review_notes,
-                "file_path": prescription.file_path,
                 "raw_text_available": bool(
                     prescription.raw_text
                 ),
@@ -1315,7 +1313,6 @@ def get_admin_review_detail(
         "id": str(prescription.id),
         "prescription_id": prescription.prescription_id,
         "file_name": prescription.file_name,
-        "file_path": prescription.file_path,
         "status": prescription.status,
         "review_status": (
             prescription.review_status

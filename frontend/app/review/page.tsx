@@ -84,7 +84,6 @@ type PrescriptionResult = {
   prescription_id?: string;
   file_name?: string;
   file_type?: string;
-  file_path?: string;
   status?: string;
   raw_text?: string | null;
   medicines?: Medicine[];

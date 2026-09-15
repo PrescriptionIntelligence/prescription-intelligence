@@ -56,7 +56,6 @@ type ReviewItem = {
   reviewed_by_id: string | null;
   reviewed_at: string | null;
   review_notes: string | null;
-  file_path: string | null;
   raw_text_available: boolean;
 };
 
@@ -64,7 +63,6 @@ type ReviewDetail = {
   id: string;
   prescription_id: string;
   file_name: string | null;
-  file_path: string | null;
   status: string | null;
   review_status: ReviewStatus;
   organization: ReviewItem["organization"];
