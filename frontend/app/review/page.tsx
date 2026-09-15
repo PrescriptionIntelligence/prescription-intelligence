@@ -156,10 +156,6 @@ function confidenceTone(value?: number | null) {
 }
 
 function getOverallConfidence(medicine: Medicine) {
-  if (typeof medicine.confidence === "number") {
-    return medicine.confidence;
-  }
-
   if (
     typeof medicine.extraction_confidence === "number" &&
     typeof medicine.normalization_confidence === "number"
@@ -957,6 +953,56 @@ export default function ReviewPage() {
     }
   }
 
+  async function completeReview() {
+    if (!prescriptionId) return;
+
+    setActionLoading(true);
+    setError(null);
+
+    try {
+      const response = await authFetch(
+        `/prescriptions/${prescriptionId}/review`,
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            action: "complete_review",
+            note: null,
+          }),
+        }
+      );
+
+      const data = await response.json();
+
+      if (response.status === 401 || response.status === 403) {
+        throw new Error(
+          data?.detail || "You are not authorized to complete this review."
+        );
+      }
+
+      if (!response.ok) {
+        throw new Error(
+          data?.detail ||
+            "Unable to complete pharmacist review."
+        );
+      }
+
+      setReview(data);
+
+      await loadReviewState();
+    } catch (err) {
+      setError(
+        err instanceof Error
+          ? err.message
+          : "Unable to complete pharmacist review."
+      );
+    } finally {
+      setActionLoading(false);
+    }
+  }
+
   async function performFindingAction(
     action:
       | "confirm"
@@ -1387,19 +1433,34 @@ export default function ReviewPage() {
               </div>
             </div>
 
-            {!isFinalized &&
-              review?.review_status === "pending" && (
-                <button
-                  disabled={actionLoading}
-                  onClick={startReview}
-                  className="rounded-full bg-[#17211d] px-5 py-3 text-sm font-medium text-white transition hover:bg-[#26332d] disabled:cursor-not-allowed disabled:opacity-50"
-                >
-                  {actionLoading
-                    ? "Starting..."
-                    : "Start pharmacist review"}
-                </button>
-              )}
-          </div>
+            {!isFinalized && (
+              <div className="shrink-0">
+                {review?.review_status === "pending" && (
+                  <button
+                    disabled={actionLoading}
+                    onClick={startReview}
+                    className="rounded-full bg-[#17211d] px-5 py-3 text-sm font-medium text-white transition hover:bg-[#26332d] disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    {actionLoading
+                      ? "Starting..."
+                      : "Start pharmacist review"}
+                  </button>
+                )}
+
+                {review?.review_status === "under_review" &&
+                  unresolvedFindingCount === 0 && (
+                    <button
+                      disabled={actionLoading}
+                      onClick={completeReview}
+                      className="rounded-full bg-[#35664d] px-5 py-3 text-sm font-medium text-white transition hover:bg-[#2d5942] disabled:cursor-not-allowed disabled:opacity-50"
+                    >
+                      {actionLoading
+                        ? "Completing..."
+                        : "Complete pharmacist review"}
+                    </button>
+                  )}
+              </div>
+            )}
 
           {review?.reviewer && (
             <div className="mt-5 border-t border-[#e4eae6] pt-5">
@@ -1421,6 +1482,7 @@ export default function ReviewPage() {
               </div>
             </div>
           )}
+        </div>
         </div>
       </section>
 

@@ -67,9 +67,6 @@ type Prescription = {
   medicines: Medicine[];
 };
 
-const API_URL =
-  process.env.NEXT_PUBLIC_API_URL || "http://127.0.0.1:8000";
-
 // =========================================================
 // Helpers
 // =========================================================
@@ -148,52 +145,33 @@ function isMedicineVerified(medicine: Medicine): boolean {
   );
 }
 
-function severityStyle(
-  severity: string
-): {
-  label: string;
-  accent: string;
-  border: string;
-  background: string;
-  text: string;
-  iconBackground: string;
-  badge: string;
-} {
-  switch (severity) {
-    case "high":
-    case "error":
-      return {
-        label: "High Priority",
-        accent: "bg-[#a83f3f]",
-        border: "border-[#eccaca]",
-        background: "bg-[#fff8f8]",
-        text: "text-[#742525]",
-        iconBackground: "bg-[#f8e4e4]",
-        badge: "bg-[#fee2e2] text-[#991b1b] border border-[#fecaca]",
-      };
+function severityStyle(severity: string) {
+  const normalized = severity.toLowerCase();
 
-    case "warning":
-      return {
-        label: "Caution",
-        accent: "bg-[#a27a28]",
-        border: "border-[#eadbb0]",
-        background: "bg-[#fffdf7]",
-        text: "text-[#725719]",
-        iconBackground: "bg-[#f7efd9]",
-        badge: "bg-[#fef3c7] text-[#92400e] border border-[#fcd34d]",
-      };
-
-    default:
-      return {
-        label: "Information",
-        accent: "bg-[#536c86]",
-        border: "border-[#d3deea]",
-        background: "bg-[#f8fafc]",
-        text: "text-[#3c536b]",
-        iconBackground: "bg-[#e8eef5]",
-        badge: "bg-[#e2e8f0] text-[#334155] border border-[#cbd5e1]",
-      };
+  if (normalized === "high" || normalized === "error") {
+    return {
+      label: "High priority",
+      badge: "border border-[#E7CACA] bg-[#FFF0F0] text-[#A74646]",
+      iconBackground:
+        "border-[#E7CACA] bg-[#FFF0F0] text-[#A74646]",
+    };
   }
+
+  if (normalized === "medium" || normalized === "warning") {
+    return {
+      label: "Caution",
+      badge: "border border-[#E5D4A8] bg-[#FFF7DF] text-[#A47B2C]",
+      iconBackground:
+        "border-[#E5D4A8] bg-[#FFF7DF] text-[#A47B2C]",
+    };
+  }
+
+  return {
+    label: "Informational",
+    badge: "border border-[#DFE6E1] bg-[#F5F8F6] text-[#526158]",
+    iconBackground:
+      "border-[#DFE6E1] bg-[#F5F8F6] text-[#526158]",
+  };
 }
 
 function medicineStatusStyle(
@@ -257,24 +235,6 @@ function formatInteractionCategory(
     );
 }
 
-function getImageUrl(
-  filePath: string | null
-): string | null {
-  if (!filePath) {
-    return null;
-  }
-
-  const fileName = filePath
-    .split(/[\\/]/)
-    .pop();
-
-  if (!fileName) {
-    return null;
-  }
-
-  return `${API_URL}/uploads/${fileName}`;
-}
-
 // =========================================================
 // Component
 // =========================================================
@@ -303,6 +263,9 @@ export default function AnalysisDetailPage() {
     downloadingReport,
     setDownloadingReport,
   ] = useState(false);
+
+  const [imageObjectUrl, setImageObjectUrl] =
+    useState<string | null>(null);
 
   const [reportError, setReportError] =
     useState("");
@@ -497,6 +460,43 @@ export default function AnalysisDetailPage() {
     }, [prescriptionId]);
 
   // -------------------------------------------------------
+  // Load prescription image (authenticated)
+  // -------------------------------------------------------
+
+  useEffect(() => {
+    if (!prescriptionId || !prescription?.file_path) {
+      return;
+    }
+
+    let objectUrl: string | null = null;
+
+    authFetch(
+      `/prescriptions/${encodeURIComponent(prescriptionId)}/image`
+    )
+      .then((response) => {
+        if (!response.ok) {
+          return null;
+        }
+        return response.blob();
+      })
+      .then((blob) => {
+        if (blob) {
+          objectUrl = URL.createObjectURL(blob);
+          setImageObjectUrl(objectUrl);
+        }
+      })
+      .catch(() => {
+        // Image unavailable — section will not render.
+      });
+
+    return () => {
+      if (objectUrl) {
+        URL.revokeObjectURL(objectUrl);
+      }
+    };
+  }, [prescriptionId, prescription?.file_path]);
+
+  // -------------------------------------------------------
   // Loading
   // -------------------------------------------------------
 
@@ -581,18 +581,21 @@ export default function AnalysisDetailPage() {
         flag.severity === "error"
     );
 
-  const cautionFlags =
-    medicationFlags.filter(
-      (flag) =>
-        flag.severity === "warning"
-    );
+  const cautionFlags = medicationFlags.filter((flag) => {
+    const severity = flag.severity.toLowerCase();
 
-  const infoFlags =
-    medicationFlags.filter(
-      (flag) =>
-        flag.severity === "info" ||
-        flag.severity === "informational"
+    return severity === "medium" || severity === "warning";
+  });
+
+  const infoFlags = medicationFlags.filter((flag) => {
+    const severity = flag.severity.toLowerCase();
+
+    return (
+      severity === "low" ||
+      severity === "info" ||
+      severity === "informational"
     );
+  });
 
   const medicineReviewRequired =
     prescription.medicines.filter(
@@ -610,22 +613,23 @@ export default function AnalysisDetailPage() {
       }
     );
 
-  const prescriptionSafetyReviewRequired =
-    medicationFlags.some(
-      (flag) =>
-        flag.severity === "high" ||
-        flag.severity === "error" ||
-        flag.severity === "warning"
+  const prescriptionSafetyReviewRequired = medicationFlags.some((flag) => {
+    const severity = flag.severity.toLowerCase();
+
+    return (
+      severity === "high" ||
+      severity === "error" ||
+      severity === "medium" ||
+      severity === "warning"
     );
+  });
 
   const needsReview =
     medicineReviewRequired.length > 0 ||
     prescriptionSafetyReviewRequired ||
     ocrFlags.length > 0;
 
-  const imageUrl = getImageUrl(
-    prescription.file_path
-  );
+  const imageUrl = imageObjectUrl;
 
   const verifiedMedicines =
     prescription.medicines.filter(
@@ -1756,7 +1760,7 @@ function MedicineCard({ medicine }: { medicine: Medicine }) {
 
           <div className="shrink-0 text-right">
             <p className="text-[10px] font-semibold uppercase tracking-[0.12em] text-[#9AA39E]">
-              Extraction
+              Confidence
             </p>
 
             <p className="mt-1 text-sm font-semibold text-[#526158]">
@@ -1843,7 +1847,7 @@ function MedicineCard({ medicine }: { medicine: Medicine }) {
         <div className="mt-5 border-t border-[#DFE6E1] pt-4">
           <div className="flex items-center justify-between">
             <span className="text-xs font-medium text-[#7C8881]">
-              Extraction confidence
+              Confidence
             </span>
 
             <span className="text-xs font-semibold text-[#526158]">
@@ -2006,12 +2010,20 @@ function OcrFlagCard({
 
 function SafetyFlagCard({ flag }: { flag: SafetyFlag }) {
   const severity = severityStyle(flag.severity);
-
   const normalizedSeverity = flag.severity.toLowerCase();
 
   const isHigh =
     normalizedSeverity === "high" ||
     normalizedSeverity === "error";
+
+  const isCaution =
+    normalizedSeverity === "medium" ||
+    normalizedSeverity === "warning";
+
+  const isInformational =
+    normalizedSeverity === "low" ||
+    normalizedSeverity === "info" ||
+    normalizedSeverity === "informational";
 
   const isStrengthConflict =
     flag.type === "strength_conflict";
@@ -2023,33 +2035,23 @@ function SafetyFlagCard({ flag }: { flag: SafetyFlag }) {
   return (
     <article
       className={`overflow-hidden rounded-2xl border bg-white shadow-sm ${
-        isStrengthConflict
+        isStrengthConflict || isHigh
           ? "border-[#E7CACA]"
-          : isHigh
-          ? "border-[#E7CACA]"
-          : normalizedSeverity === "warning"
+          : isCaution
           ? "border-[#E5D4A8]"
           : "border-[#DFE6E1]"
       }`}
     >
-      {/* =====================================================
-          Header
-      ===================================================== */}
-
       <div
         className={`border-l-4 px-5 py-5 ${
-          isStrengthConflict
+          isStrengthConflict || isHigh
             ? "border-[#A74646]"
-            : isHigh
-            ? "border-[#A74646]"
-            : normalizedSeverity === "warning"
+            : isCaution
             ? "border-[#A47B2C]"
             : "border-[#8A9891]"
         }`}
       >
         <div className="flex items-start gap-3">
-          {/* Finding icon */}
-
           <div
             className={`flex h-10 w-10 shrink-0 items-center justify-center rounded-xl border text-sm font-bold ${
               isStrengthConflict
@@ -2057,16 +2059,14 @@ function SafetyFlagCard({ flag }: { flag: SafetyFlag }) {
                 : severity.iconBackground
             }`}
           >
-            {isHigh
+            {isHigh || isStrengthConflict
               ? "!"
-              : normalizedSeverity === "warning"
+              : isCaution
               ? "!"
               : "i"}
           </div>
 
           <div className="min-w-0 flex-1">
-            {/* Finding badges */}
-
             <div className="flex flex-wrap items-center gap-2">
               <span
                 className={`rounded-full px-2.5 py-1 text-[10px] font-semibold uppercase tracking-[0.08em] ${
@@ -2086,21 +2086,16 @@ function SafetyFlagCard({ flag }: { flag: SafetyFlag }) {
                 </span>
               )}
 
-              {isInteraction &&
-                !isStrengthConflict && (
-                  <span className="rounded-full border border-[#DFE6E1] bg-[#FAFCFB] px-2.5 py-1 text-[10px] font-medium text-[#526158]">
-                    Drug interaction
-                  </span>
-                )}
+              {isInteraction && !isStrengthConflict && (
+                <span className="rounded-full border border-[#DFE6E1] bg-[#FAFCFB] px-2.5 py-1 text-[10px] font-medium text-[#526158]">
+                  Drug interaction
+                </span>
+              )}
             </div>
-
-            {/* Finding title */}
 
             <h3 className="mt-3 text-[15px] font-semibold leading-6 tracking-[-0.01em] text-[#17211D]">
               {flag.message}
             </h3>
-
-            {/* Medicine */}
 
             {flag.medicine && (
               <p className="mt-1.5 text-xs text-[#7C8881]">
@@ -2114,9 +2109,7 @@ function SafetyFlagCard({ flag }: { flag: SafetyFlag }) {
         </div>
       </div>
 
-      {/* =====================================================
-          Strength conflict — primary clinical comparison
-      ===================================================== */}
+      {/* Keep your existing strength-conflict section unchanged */}
 
       {isStrengthConflict && (
         <div className="border-t border-[#E7CACA] bg-[#FFF8F8] px-5 py-5">
@@ -2133,8 +2126,6 @@ function SafetyFlagCard({ flag }: { flag: SafetyFlag }) {
             associated with the resolved medicine reference.
           </p>
 
-          {/* Strength comparison */}
-
           <div className="mt-4 grid gap-px overflow-hidden rounded-xl border border-[#E7CACA] bg-[#E7CACA] sm:grid-cols-2">
             <div className="bg-white px-4 py-4">
               <p className="text-[9px] font-bold uppercase tracking-[0.12em] text-[#9AA39E]">
@@ -2143,8 +2134,7 @@ function SafetyFlagCard({ flag }: { flag: SafetyFlag }) {
 
               <div className="mt-2 flex items-baseline gap-2">
                 <p className="text-2xl font-semibold tracking-[-0.03em] text-[#17211D]">
-                  {flag.prescription_strength ||
-                    "Not available"}
+                  {flag.prescription_strength || "Not available"}
                 </p>
 
                 <span className="text-[10px] font-medium uppercase tracking-wide text-[#A74646]">
@@ -2160,8 +2150,7 @@ function SafetyFlagCard({ flag }: { flag: SafetyFlag }) {
 
               <div className="mt-2 flex items-baseline gap-2">
                 <p className="text-2xl font-semibold tracking-[-0.03em] text-[#17211D]">
-                  {flag.reference_strength ||
-                    "Not available"}
+                  {flag.reference_strength || "Not available"}
                 </p>
 
                 <span className="text-[10px] font-medium uppercase tracking-wide text-[#526158]">
@@ -2171,14 +2160,10 @@ function SafetyFlagCard({ flag }: { flag: SafetyFlag }) {
             </div>
           </div>
 
-          {/* Clinical action */}
-
           <div className="mt-4 rounded-xl border border-[#E7CACA] bg-[#FFF0F0] px-4 py-4">
             <div className="flex items-start gap-3">
               <div className="mt-0.5 grid h-7 w-7 shrink-0 place-items-center rounded-full bg-[#F8DEDE] text-[#A74646]">
-                <span className="text-xs font-bold">
-                  !
-                </span>
+                <span className="text-xs font-bold">!</span>
               </div>
 
               <div>
@@ -2197,9 +2182,7 @@ function SafetyFlagCard({ flag }: { flag: SafetyFlag }) {
         </div>
       )}
 
-      {/* =====================================================
-          Interaction details
-      ===================================================== */}
+      {/* Existing interaction details section */}
 
       {isInteraction &&
         flag.matched_drugs?.length &&
@@ -2214,36 +2197,29 @@ function SafetyFlagCard({ flag }: { flag: SafetyFlag }) {
             </div>
 
             <div className="mt-3 flex flex-wrap items-center gap-2">
-              {flag.matched_drugs.map(
-                (drug, index) => (
-                  <div
-                    key={`${drug}-${index}`}
-                    className="flex items-center gap-2"
-                  >
-                    <span className="rounded-lg border border-[#DFE6E1] bg-white px-3 py-2 text-xs font-semibold text-[#526158] shadow-sm">
-                      {drug}
-                    </span>
+              {flag.matched_drugs.map((drug, index) => (
+                <div
+                  key={`${drug}-${index}`}
+                  className="flex items-center gap-2"
+                >
+                  <span className="rounded-lg border border-[#DFE6E1] bg-white px-3 py-2 text-xs font-semibold text-[#526158] shadow-sm">
+                    {drug}
+                  </span>
 
-                    {index <
-                      flag.matched_drugs!.length -
-                        1 && (
-                      <span className="text-xs font-bold text-[#A74646]">
-                        +
-                      </span>
-                    )}
-                  </div>
-                )
-              )}
+                  {index < flag.matched_drugs!.length - 1 && (
+                    <span className="text-xs font-bold text-[#A74646]">
+                      +
+                    </span>
+                  )}
+                </div>
+              ))}
             </div>
           </div>
         )}
 
-      {/* =====================================================
-          Clinical metadata
-      ===================================================== */}
+      {/* Existing clinical metadata section */}
 
-      {(flag.interaction_category ||
-        flag.evidence_source) && (
+      {(flag.interaction_category || flag.evidence_source) && (
         <div className="mx-5 mt-5 grid gap-3 sm:grid-cols-2">
           {flag.interaction_category && (
             <div className="rounded-xl border border-[#DFE6E1] bg-[#FAFCFB] p-4">
@@ -2252,9 +2228,7 @@ function SafetyFlagCard({ flag }: { flag: SafetyFlag }) {
               </p>
 
               <p className="mt-2 text-sm font-semibold text-[#526158]">
-                {formatInteractionCategory(
-                  flag.interaction_category
-                )}
+                {formatInteractionCategory(flag.interaction_category)}
               </p>
             </div>
           )}
@@ -2273,37 +2247,41 @@ function SafetyFlagCard({ flag }: { flag: SafetyFlag }) {
         </div>
       )}
 
-      {/* =====================================================
-          Recommended action
-      ===================================================== */}
+      {/* Recommended action */}
 
       {flag.review_action && (
         <div
           className={`mx-5 mt-5 rounded-xl border px-4 py-4 ${
-            isHigh
+            isStrengthConflict || isHigh
               ? "border-[#E7CACA] bg-[#FFF0F0]"
-              : "border-[#E5D4A8] bg-[#FFF7DF]"
+              : isCaution
+              ? "border-[#E5D4A8] bg-[#FFF7DF]"
+              : "border-[#DFE6E1] bg-[#FAFCFB]"
           }`}
         >
           <div className="flex items-start gap-3">
             <div
               className={`mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-full ${
-                isHigh
+                isStrengthConflict || isHigh
                   ? "bg-[#F8DEDE] text-[#A74646]"
-                  : "bg-[#F8EDC8] text-[#A47B2C]"
+                  : isCaution
+                  ? "bg-[#F8EDC8] text-[#A47B2C]"
+                  : "bg-[#EDF1EE] text-[#68766F]"
               }`}
             >
               <span className="text-xs font-bold">
-                !
+                {isInformational ? "i" : "!"}
               </span>
             </div>
 
             <div className="min-w-0">
               <p
                 className={`text-[10px] font-semibold uppercase tracking-[0.12em] ${
-                  isHigh
+                  isStrengthConflict || isHigh
                     ? "text-[#A74646]"
-                    : "text-[#A47B2C]"
+                    : isCaution
+                    ? "text-[#A47B2C]"
+                    : "text-[#68766F]"
                 }`}
               >
                 Recommended action
@@ -2317,28 +2295,21 @@ function SafetyFlagCard({ flag }: { flag: SafetyFlag }) {
         </div>
       )}
 
-      {/* =====================================================
-          Resolution metadata
-      ===================================================== */}
+      {/* Existing resolution metadata */}
 
-      {isStrengthConflict &&
-        flag.resolution_reason && (
-          <div className="mx-5 mt-5 rounded-xl border border-[#DFE6E1] bg-[#FAFCFB] px-4 py-3">
-            <div className="flex flex-wrap items-center justify-between gap-2">
-              <span className="text-[10px] font-semibold uppercase tracking-[0.12em] text-[#9AA39E]">
-                Resolution
-              </span>
+      {isStrengthConflict && flag.resolution_reason && (
+        <div className="mx-5 mt-5 rounded-xl border border-[#DFE6E1] bg-[#FAFCFB] px-4 py-3">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <span className="text-[10px] font-semibold uppercase tracking-[0.12em] text-[#9AA39E]">
+              Resolution
+            </span>
 
-              <code className="rounded-md bg-white px-2 py-1 text-[10px] font-medium text-[#7C8881]">
-                {flag.resolution_reason}
-              </code>
-            </div>
+            <code className="rounded-md bg-white px-2 py-1 text-[10px] font-medium text-[#7C8881]">
+              {flag.resolution_reason}
+            </code>
           </div>
-        )}
-
-      {/* =====================================================
-          Reference
-      ===================================================== */}
+        </div>
+      )}
 
       {flag.interaction_id && (
         <div className="mx-5 mt-5 flex flex-col gap-2 border-t border-[#DFE6E1] py-4 sm:flex-row sm:items-center sm:justify-between">
@@ -2358,11 +2329,7 @@ function SafetyFlagCard({ flag }: { flag: SafetyFlag }) {
         </div>
       )}
 
-      {/* Bottom spacing when there is no reference */}
-
-      {!flag.interaction_id && (
-        <div className="h-1" />
-      )}
+      {!flag.interaction_id && <div className="h-1" />}
     </article>
   );
 }

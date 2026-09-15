@@ -6,7 +6,7 @@ into a professional, printable PDF.
 
 This module does NOT perform medical reasoning.
 It only presents already-generated prescription,
-interpretation, and safety information.
+interpretation, safety, OCR, and pharmacist-review data.
 """
 
 from __future__ import annotations
@@ -15,7 +15,7 @@ from io import BytesIO
 from typing import Any
 
 from reportlab.lib import colors
-from reportlab.lib.enums import TA_CENTER, TA_LEFT
+from reportlab.lib.enums import TA_LEFT
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.styles import (
     ParagraphStyle,
@@ -69,7 +69,8 @@ def _format_confidence(
     value: Any,
 ) -> str:
     """
-    Convert a 0..1 confidence value into a percentage.
+    Convert a 0..1 or percentage-style confidence value
+    into a percentage.
     """
 
     if value is None:
@@ -80,7 +81,13 @@ def _format_confidence(
     except (TypeError, ValueError):
         return "—"
 
-    number = max(0.0, min(1.0, number))
+    if number > 1:
+        number = number / 100.0
+
+    number = max(
+        0.0,
+        min(1.0, number),
+    )
 
     return f"{number * 100:.0f}%"
 
@@ -103,6 +110,24 @@ def _format_status(
     ).title()
 
 
+def _format_review_status(
+    value: Any,
+) -> str:
+    """
+    Convert review status into a compact uppercase label.
+    """
+
+    text = _text(
+        value,
+        "PENDING",
+    )
+
+    return text.replace(
+        "_",
+        " ",
+    ).upper()
+
+
 def _format_duration(
     duration: Any,
 ) -> str:
@@ -115,12 +140,105 @@ def _format_duration(
         unit = duration.get("unit")
 
         if value is not None and unit:
-            return f"{value:g} {unit}"
+            try:
+                numeric_value = float(value)
+
+                if numeric_value.is_integer():
+                    value_text = str(
+                        int(numeric_value)
+                    )
+                else:
+                    value_text = str(
+                        numeric_value
+                    )
+
+            except (TypeError, ValueError):
+                value_text = str(value)
+
+            return f"{value_text} {unit}"
 
         if duration.get("text"):
-            return _text(duration["text"])
+            return _text(
+                duration["text"]
+            )
 
     return _text(duration)
+
+
+def _format_datetime(
+    value: Any,
+) -> str:
+    """
+    Convert a datetime or ISO timestamp into a readable
+    UTC timestamp.
+    """
+
+    if value is None:
+        return "—"
+
+    try:
+        from datetime import datetime, timezone
+
+        if isinstance(value, datetime):
+            dt = value
+        else:
+            text = str(value).strip()
+
+            if not text:
+                return "—"
+
+            dt = datetime.fromisoformat(
+                text.replace(
+                    "Z",
+                    "+00:00",
+                )
+            )
+
+        if dt.tzinfo is None:
+            dt = dt.replace(
+                tzinfo=timezone.utc
+            )
+
+        dt = dt.astimezone(timezone.utc)
+
+        return dt.strftime(
+            "%d %b %Y, %I:%M %p UTC"
+        )
+
+    except (
+        TypeError,
+        ValueError,
+    ):
+        return _text(value)
+
+
+def _escape_paragraph_text(
+    value: Any,
+) -> str:
+    """
+    Escape text that will be inserted into ReportLab
+    Paragraph markup.
+    """
+
+    text = _text(
+        value,
+        "",
+    )
+
+    return (
+        text.replace(
+            "&",
+            "&amp;",
+        )
+        .replace(
+            "<",
+            "&lt;",
+        )
+        .replace(
+            ">",
+            "&gt;",
+        )
+    )
 
 
 # ---------------------------------------------------------
@@ -143,26 +261,31 @@ def _build_styles():
             fontSize=20,
             leading=24,
             alignment=TA_LEFT,
+            textColor=colors.HexColor("#17211D"),
             spaceAfter=3 * mm,
         ),
+
         "subtitle": ParagraphStyle(
             "PrescriptionSubtitle",
             parent=styles["Normal"],
             fontName="Helvetica",
             fontSize=9,
             leading=12,
-            textColor=colors.HexColor("#5B6470"),
+            textColor=colors.HexColor("#526158"),
             spaceAfter=7 * mm,
         ),
+
         "section": ParagraphStyle(
             "PrescriptionSection",
             parent=styles["Heading2"],
             fontName="Helvetica-Bold",
             fontSize=12,
             leading=15,
+            textColor=colors.HexColor("#17211D"),
             spaceBefore=5 * mm,
             spaceAfter=3 * mm,
         ),
+
         "body": ParagraphStyle(
             "PrescriptionBody",
             parent=styles["BodyText"],
@@ -171,6 +294,7 @@ def _build_styles():
             leading=13,
             textColor=colors.HexColor("#20252B"),
         ),
+
         "small": ParagraphStyle(
             "PrescriptionSmall",
             parent=styles["BodyText"],
@@ -179,6 +303,7 @@ def _build_styles():
             leading=10,
             textColor=colors.HexColor("#66707A"),
         ),
+
         "table_header": ParagraphStyle(
             "PrescriptionTableHeader",
             parent=styles["BodyText"],
@@ -187,6 +312,7 @@ def _build_styles():
             leading=9,
             textColor=colors.white,
         ),
+
         "table_body": ParagraphStyle(
             "PrescriptionTableBody",
             parent=styles["BodyText"],
@@ -195,22 +321,17 @@ def _build_styles():
             leading=10,
             textColor=colors.HexColor("#20252B"),
         ),
+
         "medicine_title": ParagraphStyle(
             "PrescriptionMedicineTitle",
             parent=styles["Heading3"],
             fontName="Helvetica-Bold",
             fontSize=10,
             leading=13,
+            textColor=colors.HexColor("#17211D"),
             spaceAfter=2 * mm,
         ),
-        "center": ParagraphStyle(
-            "PrescriptionCenter",
-            parent=styles["BodyText"],
-            fontName="Helvetica",
-            fontSize=9,
-            leading=12,
-            alignment=TA_CENTER,
-        ),
+
         "warning": ParagraphStyle(
             "PrescriptionWarning",
             parent=styles["BodyText"],
@@ -218,6 +339,24 @@ def _build_styles():
             fontSize=8,
             leading=12,
             textColor=colors.HexColor("#7A4E00"),
+        ),
+
+        "review": ParagraphStyle(
+            "PrescriptionReview",
+            parent=styles["BodyText"],
+            fontName="Helvetica",
+            fontSize=8.5,
+            leading=12,
+            textColor=colors.HexColor("#20252B"),
+        ),
+
+        "audit": ParagraphStyle(
+            "PrescriptionAudit",
+            parent=styles["BodyText"],
+            fontName="Helvetica",
+            fontSize=8,
+            leading=11,
+            textColor=colors.HexColor("#526158"),
         ),
     }
 
@@ -239,9 +378,8 @@ def _draw_page_header_footer(
 
     width, height = A4
 
-    # Header line
     canvas.setStrokeColor(
-        colors.HexColor("#D9DEE5")
+        colors.HexColor("#D9E2DC")
     )
     canvas.setLineWidth(0.5)
 
@@ -258,7 +396,7 @@ def _draw_page_header_footer(
     )
 
     canvas.setFillColor(
-        colors.HexColor("#5B6470")
+        colors.HexColor("#526158")
     )
 
     canvas.drawString(
@@ -267,7 +405,6 @@ def _draw_page_header_footer(
         "PRESCRIPTION INTELLIGENCE",
     )
 
-    # Footer
     canvas.line(
         MARGIN_LEFT,
         10 * mm,
@@ -324,11 +461,11 @@ def _key_value_table(
         data.append(
             [
                 Paragraph(
-                    f"<b>{_text(label)}</b>",
+                    f"<b>{_escape_paragraph_text(label)}</b>",
                     styles["table_body"],
                 ),
                 Paragraph(
-                    _text(value),
+                    _escape_paragraph_text(value),
                     styles["table_body"],
                 ),
             ]
@@ -350,14 +487,14 @@ def _key_value_table(
                     "BACKGROUND",
                     (0, 0),
                     (0, -1),
-                    colors.HexColor("#F4F6F8"),
+                    colors.HexColor("#F4F7F5"),
                 ),
                 (
                     "GRID",
                     (0, 0),
                     (-1, -1),
                     0.35,
-                    colors.HexColor("#D9DEE5"),
+                    colors.HexColor("#DFE6E1"),
                 ),
                 (
                     "VALIGN",
@@ -410,54 +547,55 @@ def _summary_block(
         {},
     )
 
-    status = report.get(
-        "overall_status",
-        "unknown",
+    confidence = report.get("confidence")
+
+    if confidence is None:
+        summary_confidence = summary.get("confidence")
+
+        if summary_confidence is not None:
+            confidence = summary_confidence
+
+    review = report.get(
+        "review",
+        {},
     )
 
-    safety_status = report.get(
-        "safety_status",
-        "unknown",
-    )
+    if not isinstance(
+        review,
+        dict,
+    ):
+        review = {}
 
-    confidence = report.get(
-        "confidence"
+    review_status = _format_review_status(
+        review.get(
+            "review_status",
+            "pending",
+        )
     )
 
     data = [
         [
             Paragraph(
-                "<b>Overall status</b>",
+                "<b>Medicines detected</b>",
                 styles["table_body"],
             ),
             Paragraph(
-                _format_status(status),
+                str(
+                    summary.get(
+                        "medicine_count",
+                        0,
+                    )
+                ),
                 styles["table_body"],
             ),
             Paragraph(
-                "<b>Safety status</b>",
+                "<b>Intelligence confidence</b>",
                 styles["table_body"],
             ),
             Paragraph(
-                _format_status(safety_status),
-                styles["table_body"],
-            ),
-        ],
-        [
-            Paragraph(
-                "<b>Medicines</b>",
-                styles["table_body"],
-            ),
-            Paragraph(
-                str(summary.get("medicine_count", 0)),
-                styles["table_body"],
-            ),
-            Paragraph(
-                "<b>Confidence</b>",
-                styles["table_body"],
-            ),
-            Paragraph(
-                _format_confidence(confidence),
+                _format_confidence(
+                    confidence
+                ),
                 styles["table_body"],
             ),
         ],
@@ -467,17 +605,20 @@ def _summary_block(
                 styles["table_body"],
             ),
             Paragraph(
-                str(summary.get("issue_count", 0)),
+                str(
+                    summary.get(
+                        "issue_count",
+                        0,
+                    )
+                ),
                 styles["table_body"],
             ),
             Paragraph(
-                "<b>Review required</b>",
+                "<b>Review status</b>",
                 styles["table_body"],
             ),
             Paragraph(
-                "Yes"
-                if status == "review_required"
-                else "No",
+                review_status,
                 styles["table_body"],
             ),
         ],
@@ -486,10 +627,10 @@ def _summary_block(
     table = Table(
         data,
         colWidths=[
-            32 * mm,
-            50 * mm,
-            35 * mm,
-            61 * mm,
+            40 * mm,
+            42 * mm,
+            42 * mm,
+            54 * mm,
         ],
     )
 
@@ -500,21 +641,21 @@ def _summary_block(
                     "BACKGROUND",
                     (0, 0),
                     (-1, -1),
-                    colors.HexColor("#F7F9FB"),
+                    colors.HexColor("#F7FAF8"),
                 ),
                 (
                     "BOX",
                     (0, 0),
                     (-1, -1),
                     0.7,
-                    colors.HexColor("#D4DAE1"),
+                    colors.HexColor("#D4DED7"),
                 ),
                 (
                     "INNERGRID",
                     (0, 0),
                     (-1, -1),
                     0.35,
-                    colors.HexColor("#D9DEE5"),
+                    colors.HexColor("#DFE6E1"),
                 ),
                 (
                     "VALIGN",
@@ -538,13 +679,13 @@ def _summary_block(
                     "TOPPADDING",
                     (0, 0),
                     (-1, -1),
-                    6,
+                    7,
                 ),
                 (
                     "BOTTOMPADDING",
                     (0, 0),
                     (-1, -1),
-                    6,
+                    7,
                 ),
             ]
         )
@@ -581,39 +722,41 @@ def _medicine_table(
         rows.append(
             [
                 Paragraph(
-                    _text(
+                    _escape_paragraph_text(
                         medicine.get("generic_name")
                         or medicine.get("medicine")
                     ),
                     styles["table_body"],
                 ),
                 Paragraph(
-                    _text(
+                    _escape_paragraph_text(
                         medicine.get("strength")
                     ),
                     styles["table_body"],
                 ),
                 Paragraph(
-                    _text(
+                    _escape_paragraph_text(
                         medicine.get("dose")
                     ),
                     styles["table_body"],
                 ),
                 Paragraph(
-                    _text(
+                    _escape_paragraph_text(
                         medicine.get("route")
                     ),
                     styles["table_body"],
                 ),
                 Paragraph(
-                    _text(
+                    _escape_paragraph_text(
                         medicine.get("frequency")
                     ),
                     styles["table_body"],
                 ),
                 Paragraph(
-                    _format_duration(
-                        medicine.get("duration")
+                    _escape_paragraph_text(
+                        _format_duration(
+                            medicine.get("duration")
+                        )
                     ),
                     styles["table_body"],
                 ),
@@ -758,7 +901,7 @@ def _safety_findings(
 
         medicine_block = [
             Paragraph(
-                title,
+                _escape_paragraph_text(title),
                 styles["medicine_title"],
             )
         ]
@@ -785,9 +928,10 @@ def _safety_findings(
             medicine_block.append(
                 Paragraph(
                     (
-                        f"<b>{severity} · "
-                        f"{issue_title}</b><br/>"
-                        f"{message}"
+                        f"<b>{_escape_paragraph_text(severity)} · "
+                        f"{_escape_paragraph_text(issue_title)}</b>"
+                        f"<br/>"
+                        f"{_escape_paragraph_text(message)}"
                     ),
                     styles["body"],
                 )
@@ -801,7 +945,9 @@ def _safety_findings(
             )
 
         flowables.append(
-            KeepTogether(medicine_block)
+            KeepTogether(
+                medicine_block
+            )
         )
 
     prescription_issues = report.get(
@@ -831,9 +977,10 @@ def _safety_findings(
             flowables.append(
                 Paragraph(
                     (
-                        f"<b>{severity} · "
-                        f"{_text(issue.get('title'))}</b><br/>"
-                        f"{_text(issue.get('message'))}"
+                        f"<b>{_escape_paragraph_text(severity)} · "
+                        f"{_escape_paragraph_text(issue.get('title'))}</b>"
+                        f"<br/>"
+                        f"{_escape_paragraph_text(issue.get('message'))}"
                     ),
                     styles["body"],
                 )
@@ -849,7 +996,21 @@ def _safety_findings(
     if not has_findings:
         flowables.append(
             Paragraph(
-                "✓ No structural prescription safety findings "
+                "<b>Safety findings: 0</b>",
+                styles["body"],
+            )
+        )
+
+        flowables.append(
+            Spacer(
+                1,
+                1.5 * mm,
+            )
+        )
+
+        flowables.append(
+            Paragraph(
+                "No structural prescription safety findings "
                 "were detected by the current analysis.",
                 styles["body"],
             )
@@ -877,29 +1038,147 @@ def _ocr_section(
         {},
     )
 
+    if not isinstance(
+        metadata,
+        dict,
+    ):
+        metadata = {}
+
     raw_text = prescription.get(
         "raw_text"
     )
 
-    ocr_quality = metadata.get(
-        "ocr_quality",
-        "unknown",
+    ocr_quality_data = metadata.get(
+        "ocr_quality"
     )
+
+    # -----------------------------------------------------
+    # Support structured OCR quality metadata
+    # -----------------------------------------------------
+
+    if isinstance(
+        ocr_quality_data,
+        dict,
+    ):
+        score = ocr_quality_data.get(
+            "score"
+        )
+
+        level = ocr_quality_data.get(
+            "level"
+        )
+
+        issues = ocr_quality_data.get(
+            "issues",
+            [],
+        )
+
+        word_count = ocr_quality_data.get(
+            "word_count"
+        )
+
+        line_count = ocr_quality_data.get(
+            "line_count"
+        )
+
+    else:
+        score = metadata.get(
+            "ocr_score"
+        )
+
+        level = ocr_quality_data
+
+        issues = metadata.get(
+            "ocr_issues",
+            [],
+        )
+
+        word_count = metadata.get(
+            "ocr_word_count"
+        )
+
+        line_count = metadata.get(
+            "ocr_line_count"
+        )
+
+    # -----------------------------------------------------
+    # Fall back to common metadata names
+    # -----------------------------------------------------
+
+    if word_count is None:
+        word_count = metadata.get(
+            "word_count"
+        )
+
+    if line_count is None:
+        line_count = metadata.get(
+            "line_count"
+        )
+
+    if score is None:
+        score = metadata.get(
+            "ocr_quality_score"
+        )
+
+    if level is None:
+        level = metadata.get(
+            "ocr_quality_level"
+        )
+
+    if not isinstance(
+        issues,
+        list,
+    ):
+        issues = []
+
+    if not issues:
+        issues_text = "None"
+    else:
+        issues_text = "; ".join(
+            str(issue)
+            for issue in issues
+        )
+
+    rows = [
+        (
+            "Score",
+            (
+                f"{float(score):.0f}%"
+                if score is not None
+                else "—"
+            ),
+        ),
+        (
+            "Quality",
+            _format_status(
+                level
+            ),
+        ),
+        (
+            "Words",
+            _text(word_count),
+        ),
+        (
+            "Lines",
+            _text(line_count),
+        ),
+        (
+            "Issues",
+            issues_text,
+        ),
+    ]
 
     text_length = metadata.get(
         "ocr_text_length"
     )
 
-    rows = [
-        (
-            "OCR quality",
-            _format_status(ocr_quality),
-        ),
-        (
-            "Extracted text length",
-            _text(text_length),
-        ),
-    ]
+    if text_length is not None:
+        rows.append(
+            (
+                "Extracted text length",
+                _text(text_length),
+            )
+        )
 
     table = _key_value_table(
         rows,
@@ -907,17 +1186,31 @@ def _ocr_section(
     )
 
     flowables = [
-        table,
-        Spacer(1, 3 * mm),
         Paragraph(
-            "<b>Extracted prescription text</b>",
+            "<b>OCR Quality</b>",
             styles["body"],
         ),
-        Spacer(1, 1.5 * mm),
+        Spacer(
+            1,
+            1.5 * mm,
+        ),
+        table,
+        Spacer(
+            1,
+            3 * mm,
+        ),
         Paragraph(
-            _text(
-                raw_text,
-                "No OCR text available.",
+            "<b>Extracted Prescription Text</b>",
+            styles["body"],
+        ),
+        Spacer(
+            1,
+            1.5 * mm,
+        ),
+        Paragraph(
+            _escape_paragraph_text(
+                raw_text
+                or "No OCR text available."
             ).replace(
                 "\n",
                 "<br/>",
@@ -927,6 +1220,317 @@ def _ocr_section(
     ]
 
     return flowables
+
+
+# ---------------------------------------------------------
+# Pharmacist verification
+# ---------------------------------------------------------
+
+
+def _review_section(
+    report: dict,
+    styles: dict,
+):
+    review = report.get(
+        "review",
+        {},
+    )
+
+    if not isinstance(
+        review,
+        dict,
+    ):
+        review = {}
+
+    status = _format_review_status(
+        review.get(
+            "review_status",
+            "pending",
+        )
+    )
+
+    reviewer = review.get(
+        "reviewer",
+        {},
+    )
+
+    if not isinstance(
+        reviewer,
+        dict,
+    ):
+        reviewer = {}
+
+    reviewer_name = (
+        reviewer.get("name")
+        or review.get("reviewer_name")
+        or "—"
+    )
+
+    reviewed_at = review.get(
+        "reviewed_at"
+    )
+
+    review_notes = review.get(
+        "review_notes"
+    )
+
+    rows = [
+        (
+            "Status",
+            status,
+        ),
+        (
+            "Reviewer",
+            _text(reviewer_name),
+        ),
+    ]
+
+    if reviewed_at:
+        rows.append(
+            (
+                "Completed",
+                _format_datetime(
+                    reviewed_at
+                ),
+            )
+        )
+
+    flowables = [
+        _key_value_table(
+            rows,
+            styles,
+        )
+    ]
+
+    if review_notes:
+        flowables.extend(
+            [
+                Spacer(
+                    1,
+                    2 * mm,
+                ),
+                Paragraph(
+                    (
+                        "<b>Review notes</b><br/>"
+                        f"{_escape_paragraph_text(review_notes)}"
+                    ),
+                    styles["review"],
+                ),
+            ]
+        )
+
+    return flowables
+
+
+# ---------------------------------------------------------
+# Review history
+# ---------------------------------------------------------
+
+
+def _review_history_section(
+    report: dict,
+    styles: dict,
+):
+    review = report.get(
+        "review",
+        {},
+    )
+
+    if not isinstance(
+        review,
+        dict,
+    ):
+        return []
+
+    audits = review.get(
+        "audits",
+        [],
+    )
+
+    if not isinstance(
+        audits,
+        list,
+    ):
+        audits = []
+
+    if not audits:
+        return [
+            Paragraph(
+                "No pharmacist review actions have been recorded.",
+                styles["small"],
+            )
+        ]
+
+    rows = [
+        [
+            Paragraph(
+                "Action",
+                styles["table_header"],
+            ),
+            Paragraph(
+                "Status transition",
+                styles["table_header"],
+            ),
+            Paragraph(
+                "Reviewer",
+                styles["table_header"],
+            ),
+            Paragraph(
+                "Timestamp",
+                styles["table_header"],
+            ),
+        ]
+    ]
+
+    reviewer = review.get(
+        "reviewer",
+        {},
+    )
+
+    if not isinstance(
+        reviewer,
+        dict,
+    ):
+        reviewer = {}
+
+    for audit in audits:
+        if not isinstance(
+            audit,
+            dict,
+        ):
+            continue
+
+        action = _format_status(
+            audit.get(
+                "action"
+            )
+        )
+
+        previous_status = _format_review_status(
+            audit.get(
+                "previous_status"
+            )
+        )
+
+        new_status = _format_review_status(
+            audit.get(
+                "new_status"
+            )
+        )
+
+        audit_reviewer = (
+            audit.get("reviewer_name")
+            or reviewer.get("name")
+            or "—"
+        )
+
+        rows.append(
+            [
+                Paragraph(
+                    _escape_paragraph_text(
+                        action
+                    ),
+                    styles["table_body"],
+                ),
+                Paragraph(
+                    (
+                        f"{_escape_paragraph_text(previous_status)} "
+                        f"-> "
+                        f"{_escape_paragraph_text(new_status)}"  
+                    ),
+                    styles["table_body"],
+                ),
+                Paragraph(
+                    _escape_paragraph_text(
+                        audit_reviewer
+                    ),
+                    styles["table_body"],
+                ),
+                Paragraph(
+                    _escape_paragraph_text(
+                        _format_datetime(
+                            audit.get(
+                                "created_at"
+                            )
+                        )
+                    ),
+                    styles["table_body"],
+                ),
+            ]
+        )
+
+    table = Table(
+        rows,
+        colWidths=[
+            31 * mm,
+            50 * mm,
+            34 * mm,
+            59 * mm,
+        ],
+        repeatRows=1,
+        hAlign="LEFT",
+    )
+
+    table.setStyle(
+        TableStyle(
+            [
+                (
+                    "BACKGROUND",
+                    (0, 0),
+                    (-1, 0),
+                    colors.HexColor("#263238"),
+                ),
+                (
+                    "GRID",
+                    (0, 0),
+                    (-1, -1),
+                    0.35,
+                    colors.HexColor("#D4DAE1"),
+                ),
+                (
+                    "ROWBACKGROUNDS",
+                    (0, 1),
+                    (-1, -1),
+                    [
+                        colors.white,
+                        colors.HexColor("#F8F9FA"),
+                    ],
+                ),
+                (
+                    "VALIGN",
+                    (0, 0),
+                    (-1, -1),
+                    "TOP",
+                ),
+                (
+                    "LEFTPADDING",
+                    (0, 0),
+                    (-1, -1),
+                    4,
+                ),
+                (
+                    "RIGHTPADDING",
+                    (0, 0),
+                    (-1, -1),
+                    4,
+                ),
+                (
+                    "TOPPADDING",
+                    (0, 0),
+                    (-1, -1),
+                    5,
+                ),
+                (
+                    "BOTTOMPADDING",
+                    (0, 0),
+                    (-1, -1),
+                    5,
+                ),
+            ]
+        )
+    )
+
+    return [table]
 
 
 # ---------------------------------------------------------
@@ -944,7 +1548,10 @@ def _disclaimer(styles: dict):
                         "AI-generated decision support. It does not "
                         "diagnose conditions, prescribe medicines, or "
                         "replace review by a qualified healthcare "
-                        "professional."
+                        "professional. Pharmacist verification recorded "
+                        "in this report reflects the review workflow "
+                        "status and does not constitute autonomous "
+                        "clinical decision-making."
                     ),
                     styles["warning"],
                 )
@@ -1014,19 +1621,12 @@ def generate_prescription_pdf(
 ) -> bytes:
     """
     Render a structured prescription report into PDF bytes.
-
-    Parameters
-    ----------
-    report:
-        Output from build_prescription_report().
-
-    Returns
-    -------
-    bytes
-        Complete PDF document.
     """
 
-    if not isinstance(report, dict):
+    if not isinstance(
+        report,
+        dict,
+    ):
         report = {}
 
     buffer = BytesIO()
@@ -1079,7 +1679,10 @@ def generate_prescription_pdf(
 
     story = []
 
+    # -----------------------------------------------------
     # Header
+    # -----------------------------------------------------
+
     story.append(
         Paragraph(
             "Prescription Intelligence",
@@ -1121,10 +1724,13 @@ def generate_prescription_pdf(
         )
     )
 
-    # Overall analysis
+    # -----------------------------------------------------
+    # Analysis Overview
+    # -----------------------------------------------------
+
     story.append(
         _section_title(
-            "Overall Analysis",
+            "Analysis Overview",
             styles,
         )
     )
@@ -1150,15 +1756,20 @@ def generate_prescription_pdf(
 
     story.append(
         Paragraph(
-            _text(
-                summary.get("message"),
-                "No summary available.",
+            _escape_paragraph_text(
+                summary.get(
+                    "message",
+                    "No summary available.",
+                )
             ),
             styles["body"],
         )
     )
 
-    # Medicines
+    # -----------------------------------------------------
+    # Medication Summary
+    # -----------------------------------------------------
+
     story.append(
         _section_title(
             "Medication Summary",
@@ -1176,7 +1787,10 @@ def generate_prescription_pdf(
         )
     )
 
-    # Safety
+    # -----------------------------------------------------
+    # Safety Analysis
+    # -----------------------------------------------------
+
     story.append(
         _section_title(
             "Safety Analysis",
@@ -1191,7 +1805,10 @@ def generate_prescription_pdf(
         )
     )
 
-    # OCR
+    # -----------------------------------------------------
+    # OCR & Extraction
+    # -----------------------------------------------------
+
     story.append(
         _section_title(
             "OCR & Extraction",
@@ -1206,7 +1823,67 @@ def generate_prescription_pdf(
         )
     )
 
+    # -----------------------------------------------------
+    # Pharmacist Verification
+    # -----------------------------------------------------
+
+    review = report.get(
+        "review",
+        {},
+    )
+
+    if isinstance(
+        review,
+        dict,
+    ) and review.get(
+        "review_status"
+    ):
+        story.append(
+            _section_title(
+                "Pharmacist Verification",
+                styles,
+            )
+        )
+
+        story.extend(
+            _review_section(
+                report,
+                styles,
+            )
+        )
+
+        story.append(
+            Spacer(
+                1,
+                2 * mm,
+            )
+        )
+
+        story.append(
+            Paragraph(
+                "<b>Review History</b>",
+                styles["body"],
+            )
+        )
+
+        story.append(
+            Spacer(
+                1,
+                1.5 * mm,
+            )
+        )
+
+        story.extend(
+            _review_history_section(
+                report,
+                styles,
+            )
+        )
+
+    # -----------------------------------------------------
     # Disclaimer
+    # -----------------------------------------------------
+
     story.append(
         Spacer(
             1,

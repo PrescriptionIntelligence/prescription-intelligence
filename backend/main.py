@@ -23,8 +23,7 @@ from fastapi import (
 )
 
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
-from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse, StreamingResponse
 
 from sqlalchemy import func
 from sqlalchemy.orm import Session, selectinload
@@ -41,6 +40,7 @@ from backend.models import (
     CustomerDB,
     MedicineDB,
     PrescriptionDB,
+    ReviewAuditDB,
     UserDB,
 )
 
@@ -103,18 +103,6 @@ app.include_router(users.router)
 app.include_router(reviews.router)
 app.include_router(customers.router)
 app.include_router(admin.router)
-
-# =========================================================
-# STATIC UPLOADS
-# =========================================================
-
-app.mount(
-    "/uploads",
-    StaticFiles(
-        directory=str(UPLOAD_DIR)
-    ),
-    name="uploads",
-)
 
 
 # =========================================================
@@ -403,20 +391,35 @@ def get_dashboard_stats(
             rx.safety_flags or []
         )
 
-        confidences = [
-            medicine.normalization_confidence
-            for medicine in rx.medicines
-            if medicine.normalization_confidence
-            is not None
-        ]
+        medicine_confidences = []
+
+        for medicine in rx.medicines:
+            extraction = (
+                medicine.extraction_confidence
+            )
+            normalization = (
+                medicine.normalization_confidence
+            )
+
+            values = [
+                v for v in (
+                    extraction, normalization
+                )
+                if v is not None
+            ]
+
+            if values:
+                medicine_confidences.append(
+                    sum(values) / len(values)
+                )
 
         avg_confidence = (
             round(
-                sum(confidences)
-                / len(confidences),
+                sum(medicine_confidences)
+                / len(medicine_confidences),
                 2,
             )
-            if confidences
+            if medicine_confidences
             else None
         )
 
@@ -1166,6 +1169,13 @@ def download_prescription_report(
     Generate a PDF intelligence report.
 
     Access is restricted according to user role.
+
+    The report combines:
+        - existing prescription intelligence
+        - OCR evidence
+        - medication safety findings
+        - stored pharmacist review status
+        - immutable pharmacist review audit history
     """
 
     prescription = (
@@ -1188,10 +1198,6 @@ def download_prescription_report(
             detail="Prescription not found",
         )
 
-    # -----------------------------------------------------
-    # Authorization
-    # -----------------------------------------------------
-
     _ensure_prescription_access(
         prescription=prescription,
         current_user=current_user,
@@ -1204,7 +1210,7 @@ def download_prescription_report(
     )
 
     # -----------------------------------------------------
-    # Re-run intelligence pipeline
+    # Rebuild the existing intelligence report
     # -----------------------------------------------------
 
     if raw_text.strip():
@@ -1214,21 +1220,19 @@ def download_prescription_report(
             )
 
         except Exception as exc:
-            logger.error(
-                "Report pipeline error for %s: %s",
+            logger.exception(
+                "Failed to rebuild prescription analysis "
+                "for PDF report %s",
                 prescription_id,
-                exc,
-                exc_info=True,
             )
 
             raise HTTPException(
                 status_code=500,
                 detail=(
-                    "Unable to generate the "
-                    "prescription analysis for "
-                    f"the report: {str(exc)}"
+                    "Unable to generate prescription "
+                    "analysis for the report."
                 ),
-            )
+            ) from exc
 
         analysis_metadata = analysis.get(
             "analysis_metadata",
@@ -1289,19 +1293,139 @@ def download_prescription_report(
         }
 
     # -----------------------------------------------------
-    # Build report
+    # Load pharmacist review state
+    # -----------------------------------------------------
+
+    review_status = (
+        prescription.review_status
+        or "pending"
+    )
+
+    reviewer = None
+
+    if prescription.reviewed_by:
+        reviewer = {
+            "id": str(
+                prescription.reviewed_by.id
+            ),
+            "name": prescription.reviewed_by.name,
+            "email": prescription.reviewed_by.email,
+            "role": prescription.reviewed_by.role,
+        }
+
+    # -----------------------------------------------------
+    # Load immutable review audit history
+    # -----------------------------------------------------
+
+    audits = (
+        db.query(ReviewAuditDB)
+        .filter(
+            ReviewAuditDB.prescription_id
+            == prescription.id
+        )
+        .order_by(
+            ReviewAuditDB.created_at.asc(),
+            ReviewAuditDB.id.asc(),
+        )
+        .all()
+    )
+
+    review_audits = []
+
+    for audit in audits:
+        audit_reviewer_name = None
+
+        if audit.reviewer:
+            audit_reviewer_name = (
+                audit.reviewer.name
+            )
+
+        review_audits.append(
+            {
+                "id": str(audit.id),
+                "action": audit.action,
+                "previous_status": (
+                    audit.previous_status
+                ),
+                "new_status": (
+                    audit.new_status
+                ),
+                "finding_type": (
+                    audit.finding_type
+                ),
+                "finding_data": (
+                    audit.finding_data
+                ),
+                "note": audit.note,
+                "reviewer_id": (
+                    str(audit.reviewer_id)
+                    if audit.reviewer_id is not None
+                    else None
+                ),
+                "reviewer_name": (
+                    audit_reviewer_name
+                ),
+                "created_at": (
+                    audit.created_at
+                ),
+            }
+        )
+
+    # -----------------------------------------------------
+    # Build stored review metadata
+    # -----------------------------------------------------
+
+    review_metadata = {
+        "review_status": review_status,
+
+        "reviewed_by_id": (
+            prescription.reviewed_by_id
+        ),
+
+        "reviewed_at": (
+            prescription.reviewed_at
+        ),
+
+        "review_notes": (
+            prescription.review_notes
+        ),
+
+        "reviewer": reviewer,
+
+        "audits": review_audits,
+    }
+
+    # -----------------------------------------------------
+    # Build structured report
     # -----------------------------------------------------
 
     report = build_prescription_report(
         safety_analysis,
+
+        source_medicines=analysis.get(
+            "medicines",
+            [],
+        ) if raw_text.strip() else [],
+
         prescription_id=(
             prescription.prescription_id
         ),
-        file_name=prescription.file_name,
+        file_name=(
+            prescription.file_name
+        ),
         raw_text=raw_text,
-        analysis_metadata=analysis_metadata,
-        interpretation=interpretation,
-        prescription_plan=prescription_plan,
+        analysis_metadata=(
+            analysis_metadata
+        ),
+        interpretation=(
+            interpretation
+        ),
+        prescription_plan=(
+            prescription_plan
+        ),
+        review_metadata=(
+            review_metadata
+        ),
     )
 
     # -----------------------------------------------------
@@ -1314,20 +1438,18 @@ def download_prescription_report(
         )
 
     except Exception as exc:
-        logger.error(
-            "PDF generation error for %s: %s",
+        logger.exception(
+            "Failed to generate prescription PDF "
+            "for %s",
             prescription_id,
-            exc,
-            exc_info=True,
         )
 
         raise HTTPException(
             status_code=500,
             detail=(
-                "Failed to generate PDF report: "
-                f"{str(exc)}"
+                "Unable to generate prescription report."
             ),
-        )
+        ) from exc
 
     filename = (
         f"{prescription.prescription_id}"
@@ -1342,6 +1464,102 @@ def download_prescription_report(
                 f'attachment; filename="{filename}"'
             )
         },
+    )
+
+
+# =========================================================
+# PRESCRIPTION IMAGE (authenticated)
+# =========================================================
+
+
+@app.get(
+    "/prescriptions/{prescription_id}/image",
+    tags=["Prescriptions"],
+)
+def get_prescription_image(
+    prescription_id: str,
+    current_user: UserDB = Depends(
+        require_any_authenticated_user
+    ),
+    db: Session = Depends(get_db),
+):
+    """
+    Serve the uploaded prescription image.
+
+    Authorization is required. The file is resolved
+    exclusively from the prescription's server-side
+    file_path record — the client never supplies a path.
+    """
+
+    prescription = (
+        db.query(PrescriptionDB)
+        .filter(
+            PrescriptionDB.prescription_id
+            == prescription_id
+        )
+        .first()
+    )
+
+    if not prescription:
+        raise HTTPException(
+            status_code=404,
+            detail="Prescription not found",
+        )
+
+    _ensure_prescription_access(
+        prescription=prescription,
+        current_user=current_user,
+        db=db,
+    )
+
+    if not prescription.file_path:
+        raise HTTPException(
+            status_code=404,
+            detail="Prescription image not available",
+        )
+
+    # --------------------------------------------------
+    # Resolve the stored path and guard against traversal.
+    #
+    # prescription.file_path is an absolute path written
+    # by the server at upload time. We resolve it and
+    # verify it is inside UPLOAD_DIR before serving.
+    # --------------------------------------------------
+
+    try:
+        image_path = Path(
+            prescription.file_path
+        ).resolve()
+    except (TypeError, ValueError):
+        raise HTTPException(
+            status_code=404,
+            detail="Prescription image not available",
+        )
+
+    upload_dir_resolved = UPLOAD_DIR.resolve()
+
+    if not str(image_path).startswith(
+        str(upload_dir_resolved)
+    ):
+        raise HTTPException(
+            status_code=404,
+            detail="Prescription image not available",
+        )
+
+    if not image_path.is_file():
+        raise HTTPException(
+            status_code=404,
+            detail="Prescription image not available",
+        )
+
+    media_type = (
+        prescription.file_type
+        or "application/octet-stream"
+    )
+
+    return FileResponse(
+        path=str(image_path),
+        media_type=media_type,
     )
 
 

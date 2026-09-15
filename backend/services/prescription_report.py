@@ -226,9 +226,45 @@ def _format_issue(
 # Medicine report
 # ---------------------------------------------------------
 
+
+def _medicine_display_confidence(
+    source_medicine: dict | None,
+) -> float | None:
+    """
+    Compute the displayed intelligence confidence for one
+    medicine using the same formula used by the frontend:
+
+        (extraction_confidence + normalization_confidence) / 2
+
+    Falls back to None when neither value is available.
+    """
+
+    if not isinstance(source_medicine, dict):
+        return None
+
+    extraction = _safe_float(
+        source_medicine.get("extraction_confidence")
+    )
+
+    normalization = _safe_float(
+        source_medicine.get("normalization_confidence")
+    )
+
+    values = [
+        v for v in (extraction, normalization)
+        if v is not None
+    ]
+
+    if not values:
+        return None
+
+    return round(sum(values) / len(values), 3)
+
+
 def _build_medicine_report(
     medicine_result: dict,
     plan_result: dict | None = None,
+    source_medicine: dict | None = None,
 ) -> dict:
     """
     Build a clean report for one medicine.
@@ -236,6 +272,9 @@ def _build_medicine_report(
     Safety information comes from medicine_result.
     Structured medication information comes from plan_result
     when available.
+    source_medicine is the raw pipeline medicine record that
+    carries extraction_confidence and normalization_confidence
+    for computing the displayed intelligence confidence.
     """
 
     if not isinstance(medicine_result, dict):
@@ -467,17 +506,22 @@ def _build_medicine_report(
         )
     )
 
-    confidence = _safe_float(
-        plan_result.get(
-            "confidence"
-        )
-    )
+    # Displayed intelligence confidence uses the same
+    # definition as the frontend and the overall report:
+    #     (extraction_confidence + normalization_confidence) / 2
+    # source_medicine is the raw pipeline record that carries
+    # those values.  Fall back to plan confidence only when
+    # the source medicine is unavailable (e.g. legacy data).
+    confidence = _medicine_display_confidence(source_medicine)
 
     if confidence is None:
         confidence = _safe_float(
-            medicine_result.get(
-                "confidence"
-            )
+            plan_result.get("confidence")
+        )
+
+    if confidence is None:
+        confidence = _safe_float(
+            medicine_result.get("confidence")
         )
 
     return {
@@ -524,6 +568,7 @@ def _build_medicine_report(
 
         "issues": formatted_issues,
     }
+
 
 # ---------------------------------------------------------
 # Summary generation
@@ -653,6 +698,82 @@ def _determine_overall_status(
 
 
 # ---------------------------------------------------------
+# Overall intelligence confidence
+# ---------------------------------------------------------
+
+
+def _compute_overall_confidence(
+    medicines: list[dict],
+) -> float | None:
+    """
+    Compute overall intelligence confidence using the same
+    medicine-level confidence model used by the frontend.
+
+    For each medicine:
+        overall medicine confidence =
+            average(extraction_confidence,
+                    normalization_confidence)
+
+    Prescription-level confidence is then the average of
+    the available medicine-level confidence values.
+
+    Returns a 0..1 value.
+    """
+
+    if not medicines:
+        return None
+
+    medicine_confidences = []
+
+    for medicine in medicines:
+        if not isinstance(
+            medicine,
+            dict,
+        ):
+            continue
+
+        values = []
+
+        extraction_confidence = _safe_float(
+            medicine.get(
+                "extraction_confidence"
+            )
+        )
+
+        normalization_confidence = _safe_float(
+            medicine.get(
+                "normalization_confidence"
+            )
+        )
+
+        if extraction_confidence is not None:
+            values.append(
+                extraction_confidence
+            )
+
+        if normalization_confidence is not None:
+            values.append(
+                normalization_confidence
+            )
+
+        if not values:
+            continue
+
+        medicine_confidences.append(
+            sum(values) / len(values)
+        )
+
+    if not medicine_confidences:
+        return None
+
+    return round(
+        sum(medicine_confidences)
+        / len(medicine_confidences),
+        3,
+    )
+
+
+# ---------------------------------------------------------
 # Main report builder
 # ---------------------------------------------------------
 
@@ -666,6 +787,8 @@ def build_prescription_report(
     analysis_metadata: dict | None = None,
     interpretation: dict | None = None,
     prescription_plan: dict | None = None,
+    review_metadata: dict | None = None,
+    source_medicines: list[dict] | None = None,
 ) -> dict:
     """
     Build the final prescription intelligence report.
@@ -726,6 +849,12 @@ def build_prescription_report(
     ):
         prescription_plan = {}
 
+    if not isinstance(
+        source_medicines,
+        list,
+    ):
+        source_medicines = []
+
     medicines = safety_analysis.get(
         "medicines",
         [],
@@ -771,10 +900,22 @@ def build_prescription_report(
             ):
                 plan_result = candidate
 
+        # Pass the matching raw pipeline medicine so that
+        # _build_medicine_report can compute the displayed
+        # confidence from extraction_confidence and
+        # normalization_confidence directly.
+        source_med = (
+            source_medicines[index]
+            if index < len(source_medicines)
+            and isinstance(source_medicines[index], dict)
+            else None
+        )
+
         medicine_reports.append(
             _build_medicine_report(
                 medicine,
                 plan_result,
+                source_med,
             )
         )
 
@@ -802,21 +943,26 @@ def build_prescription_report(
         "review_required",
     )
 
-    confidence = _safe_float(
-        prescription_plan.get(
-            "confidence"
-        )
+    # -----------------------------------------------------
+    # Overall intelligence confidence
+    # -----------------------------------------------------
+
+    confidence = _compute_overall_confidence(
+        source_medicines
     )
 
     if confidence is None:
         confidence = _safe_float(
-            interpretation.get(
-                "confidence"
-            )
+            prescription_plan.get("confidence")
+        )
+
+    if confidence is None:
+        confidence = _safe_float(
+            interpretation.get("confidence")
         )
 
     return {
-        "report_version": "1.0",
+        "report_version": "1.1",
         "generated_at": datetime.now(
             timezone.utc
         ).isoformat(),
@@ -835,4 +981,5 @@ def build_prescription_report(
         "interpretation": interpretation,
         "prescription_plan": prescription_plan,
         "safety_analysis": safety_analysis,
+        "review": review_metadata,
     }

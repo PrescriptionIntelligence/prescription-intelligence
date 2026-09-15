@@ -2434,6 +2434,244 @@ class TestPrescriptionAuthorization:
         assert response.status_code == 404
         assert response.json()["detail"] == "Prescription not found"
 
+
+class TestPrescriptionImageEndpoint:
+    """
+    Security regression tests for GET /prescriptions/{id}/image.
+
+    The endpoint must:
+    - Reject unauthenticated requests (401)
+    - Reject cross-org pharmacist access (404 — prescription not found)
+    - Reject cross-customer access (404 — prescription not found)
+    - Allow authorized pharmacist to proceed past auth gate
+    - Allow authorized customer to proceed past auth gate
+    - Allow admin to proceed past auth gate
+    - Return 404 when prescription has no stored file_path
+    - Return 404 for a nonexistent prescription_id
+    - Return 200 with image bytes when file_path points to a real file
+    - Reject path traversal attempts via prescription_id
+    """
+
+    def test_unauthenticated_request_returns_401(
+        self,
+        test_app,
+        prescription_access_scenario,
+    ):
+        scenario = prescription_access_scenario
+
+        response = test_app.get(
+            f"/prescriptions/{scenario['prescription_a'].prescription_id}/image"
+        )
+
+        assert response.status_code == 401
+
+    def test_nonexistent_prescription_returns_404(
+        self,
+        test_app,
+        prescription_access_scenario,
+    ):
+        token = _login_for_access_test(
+            test_app,
+            "access-pharmacist-a@example.com",
+            "password-a",
+        )
+
+        response = test_app.get(
+            "/prescriptions/RX-DOES-NOT-EXIST/image",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+        assert response.status_code == 404
+        assert response.json()["detail"] == "Prescription not found"
+
+    def test_cross_org_pharmacist_cannot_access_image(
+        self,
+        test_app,
+        prescription_access_scenario,
+    ):
+        """Pharmacist B must not access prescription A's image."""
+        scenario = prescription_access_scenario
+
+        token = _login_for_access_test(
+            test_app,
+            "access-pharmacist-b@example.com",
+            "password-b",
+        )
+
+        response = test_app.get(
+            f"/prescriptions/{scenario['prescription_a'].prescription_id}/image",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+        assert response.status_code == 404
+
+    def test_cross_customer_cannot_access_image(
+        self,
+        test_app,
+        prescription_access_scenario,
+    ):
+        """Customer B must not access prescription A's image."""
+        scenario = prescription_access_scenario
+
+        token = _login_for_access_test(
+            test_app,
+            "access-customer-b@example.com",
+            "password-customer-b",
+        )
+
+        response = test_app.get(
+            f"/prescriptions/{scenario['prescription_a'].prescription_id}/image",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+        assert response.status_code == 404
+
+    def test_authorized_pharmacist_with_no_file_gets_404_image_unavailable(
+        self,
+        test_app,
+        prescription_access_scenario,
+    ):
+        """Pharmacist A can access prescription A, but it has no stored file_path."""
+        scenario = prescription_access_scenario
+
+        token = _login_for_access_test(
+            test_app,
+            "access-pharmacist-a@example.com",
+            "password-a",
+        )
+
+        response = test_app.get(
+            f"/prescriptions/{scenario['prescription_a'].prescription_id}/image",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+        assert response.status_code == 404
+        assert response.json()["detail"] == "Prescription image not available"
+
+    def test_authorized_customer_with_no_file_gets_404_image_unavailable(
+        self,
+        test_app,
+        prescription_access_scenario,
+    ):
+        """Customer A can access prescription A, but it has no stored file_path."""
+        scenario = prescription_access_scenario
+
+        token = _login_for_access_test(
+            test_app,
+            "access-customer-a@example.com",
+            "password-customer-a",
+        )
+
+        response = test_app.get(
+            f"/prescriptions/{scenario['prescription_a'].prescription_id}/image",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+        assert response.status_code == 404
+        assert response.json()["detail"] == "Prescription image not available"
+
+    def test_admin_with_no_file_gets_404_image_unavailable(
+        self,
+        test_app,
+        prescription_access_scenario,
+    ):
+        """Admin can access any prescription, but prescription A has no file_path."""
+        scenario = prescription_access_scenario
+
+        token = _login_for_access_test(
+            test_app,
+            "access-admin@example.com",
+            "password-admin",
+        )
+
+        response = test_app.get(
+            f"/prescriptions/{scenario['prescription_a'].prescription_id}/image",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+        assert response.status_code == 404
+        assert response.json()["detail"] == "Prescription image not available"
+
+    def test_authorized_pharmacist_receives_image_bytes(
+        self,
+        test_app,
+        prescription_access_scenario,
+        auth_db_session,
+        tmp_path,
+    ):
+        """
+        When file_path points to a real file inside UPLOAD_DIR,
+        an authorized pharmacist receives 200 with the image bytes.
+        """
+        import backend.main as main_module
+
+        # Write a tiny PNG-like stub inside UPLOAD_DIR.
+        image_file = main_module.UPLOAD_DIR / "test-access-image.jpg"
+        image_file.write_bytes(b"FAKE_IMAGE_BYTES")
+
+        try:
+            scenario = prescription_access_scenario
+            rx = scenario["prescription_a"]
+
+            # Point the prescription at the real file.
+            auth_db_session.query(PrescriptionDB).filter(
+                PrescriptionDB.prescription_id == rx.prescription_id
+            ).update(
+                {
+                    "file_path": str(image_file),
+                    "file_type": "image/jpeg",
+                }
+            )
+            auth_db_session.commit()
+
+            token = _login_for_access_test(
+                test_app,
+                "access-pharmacist-a@example.com",
+                "password-a",
+            )
+
+            response = test_app.get(
+                f"/prescriptions/{rx.prescription_id}/image",
+                headers={"Authorization": f"Bearer {token}"},
+            )
+
+            assert response.status_code == 200
+            assert response.content == b"FAKE_IMAGE_BYTES"
+
+        finally:
+            # Restore prescription to no file_path so other tests are unaffected.
+            auth_db_session.query(PrescriptionDB).filter(
+                PrescriptionDB.prescription_id == rx.prescription_id
+            ).update({"file_path": None, "file_type": "text/plain"})
+            auth_db_session.commit()
+
+            if image_file.exists():
+                image_file.unlink()
+
+    def test_path_traversal_via_prescription_id_returns_404(
+        self,
+        test_app,
+        prescription_access_scenario,
+    ):
+        """
+        A traversal-style prescription_id (e.g. '../../etc/passwd') must
+        never expose server files — it simply won't match any prescription
+        record and must return 404.
+        """
+        token = _login_for_access_test(
+            test_app,
+            "access-pharmacist-a@example.com",
+            "password-a",
+        )
+
+        response = test_app.get(
+            "/prescriptions/..%2F..%2Fetc%2Fpasswd/image",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+        assert response.status_code == 404
+
+
 class TestPrescriptionExtractionAudit:
     """
     Production-oriented regression coverage for prescription
@@ -2722,3 +2960,5 @@ class TestSpatialOCRMedicineEvidence:
             in candidate["candidate"].lower()
             for candidate in result["candidates"]
         )
+
+        

@@ -370,6 +370,7 @@ export default function AdminReviewsPage() {
       | "correct"
       | "dismiss"
       | "clarify"
+      | "complete_review"
   ) {
     if (!detail) return;
 

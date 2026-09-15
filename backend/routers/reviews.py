@@ -34,6 +34,7 @@ VALID_ACTIONS = {
     "correct",
     "dismiss",
     "clarify",
+    "complete_review",
 }
 
 VALID_STATUSES = {
@@ -48,6 +49,7 @@ RESOLVING_ACTIONS = {
     "confirm",
     "correct",
     "dismiss",
+    "complete_review",
 }
 
 
@@ -284,7 +286,10 @@ def validate_finding(
     AI-generated finding at that index.
     """
 
-    if request.action == "start_review":
+    if request.action in {
+        "start_review",
+        "complete_review",
+    }:
         return
 
     if request.finding is None:
@@ -394,6 +399,32 @@ def determine_new_status(
                     if finding is not current_finding
                 ]
 
+    if action == "complete_review":
+        unresolved_findings = get_unresolved_findings(
+            prescription,
+            db,
+        )
+
+        if unresolved_findings:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=(
+                    "All safety findings must be resolved "
+                    "before completing the pharmacist review."
+                ),
+            )
+
+        if prescription.review_status != "under_review":
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=(
+                    "Prescription must be under review "
+                    "before it can be completed."
+                ),
+            )
+
+        return "verified"
+
     if action == "start_review":
         return "under_review"
 
@@ -426,110 +457,6 @@ def determine_new_status(
     if action == "confirm":
         if unresolved_high_priority:
             return "under_review"
-        return "verified"
-
-    raise HTTPException(
-        status_code=status.HTTP_400_BAD_REQUEST,
-        detail="Unable to determine review status",
-    )
-
-    # -----------------------------------------------------
-    # Start review
-    # -----------------------------------------------------
-
-    if action == "start_review":
-        return "under_review"
-
-    # -----------------------------------------------------
-    # Clarification
-    # -----------------------------------------------------
-
-    if action == "clarify":
-        return "needs_clarification"
-
-    # -----------------------------------------------------
-    # Explicit rejection
-    # -----------------------------------------------------
-
-    if action == "dismiss":
-
-        if unresolved_high_priority:
-            return "under_review"
-
-        return "rejected"
-
-    # -----------------------------------------------------
-    # Correction
-    # -----------------------------------------------------
-
-    if action == "correct":
-
-        if unresolved_high_priority:
-            return "under_review"
-
-        return "verified"
-
-    # -----------------------------------------------------
-    # Confirmation
-    # -----------------------------------------------------
-
-    if action == "confirm":
-
-        if unresolved_high_priority:
-            return "under_review"
-
-        return "verified"
-
-    raise HTTPException(
-        status_code=status.HTTP_400_BAD_REQUEST,
-        detail="Unable to determine review status",
-    )
-
-    # -----------------------------------------------------
-    # Start review
-    # -----------------------------------------------------
-
-    if action == "start_review":
-        return "under_review"
-
-    # -----------------------------------------------------
-    # Clarification
-    # -----------------------------------------------------
-
-    if action == "clarify":
-        return "needs_clarification"
-
-    # -----------------------------------------------------
-    # Explicit rejection
-    # -----------------------------------------------------
-
-    if action == "dismiss":
-
-        if unresolved_high_priority:
-            return "under_review"
-
-        return "rejected"
-
-    # -----------------------------------------------------
-    # Correction
-    # -----------------------------------------------------
-
-    if action == "correct":
-
-        if unresolved_high_priority:
-            return "under_review"
-
-        return "verified"
-
-    # -----------------------------------------------------
-    # Confirmation
-    # -----------------------------------------------------
-
-    if action == "confirm":
-
-        if unresolved_high_priority:
-            return "under_review"
-
         return "verified"
 
     raise HTTPException(

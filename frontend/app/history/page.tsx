@@ -30,9 +30,6 @@ type Prescription = {
   medicines: Medicine[];
 };
 
-const API_URL =
-  process.env.NEXT_PUBLIC_API_URL || "http://127.0.0.1:8000";
-
 const PAGE_SIZE = 20;
 
 function formatDate(value: string): string {
@@ -53,31 +50,37 @@ function getStatus(status: string) {
   if (status === "analyzed") {
     return {
       label: "Analyzed",
-      className: "bg-[#EDF8F1] text-[#35664D] border-[#CBE0D3]",
+      className:
+        "bg-[#EDF8F1] text-[#35664D] border-[#CBE0D3]",
     };
   }
 
   if (status === "ocr_failed") {
     return {
       label: "OCR failed",
-      className: "bg-[#FFF0F0] text-[#A74646] border-[#E8CECA]",
+      className:
+        "bg-[#FFF0F0] text-[#A74646] border-[#E8CECA]",
     };
   }
 
   if (status === "uploaded") {
     return {
       label: "Uploaded",
-      className: "bg-[#F5F8F6] text-[#526158] border-[#DFE6E1]",
+      className:
+        "bg-[#F5F8F6] text-[#526158] border-[#DFE6E1]",
     };
   }
 
   return {
     label: status,
-    className: "bg-[#F5F8F6] text-[#526158] border-[#DFE6E1]",
+    className:
+      "bg-[#F5F8F6] text-[#526158] border-[#DFE6E1]",
   };
 }
 
-function getSafetyFlags(prescription: Prescription): SafetyFlag[] {
+function getSafetyFlags(
+  prescription: Prescription
+): SafetyFlag[] {
   return (prescription.safety_flags || []).filter(
     (flag) =>
       flag.type !== "ocr_extraction_failed" &&
@@ -85,13 +88,54 @@ function getSafetyFlags(prescription: Prescription): SafetyFlag[] {
   );
 }
 
-function hasHighPriority(prescription: Prescription): boolean {
-  return getSafetyFlags(prescription).some(
-    (flag) => flag.severity.toLowerCase() === "high"
-  );
+function getSeverity(flag: SafetyFlag): string {
+  return flag.severity.toLowerCase();
 }
 
-function hasInteraction(prescription: Prescription): boolean {
+function hasHighPriority(
+  prescription: Prescription
+): boolean {
+  return getSafetyFlags(prescription).some((flag) => {
+    const severity = getSeverity(flag);
+
+    return (
+      severity === "high" ||
+      severity === "error"
+    );
+  });
+}
+
+function hasCautionFinding(
+  prescription: Prescription
+): boolean {
+  return getSafetyFlags(prescription).some((flag) => {
+    const severity = getSeverity(flag);
+
+    return (
+      severity === "medium" ||
+      severity === "warning"
+    );
+  });
+}
+
+function requiresReview(
+  prescription: Prescription
+): boolean {
+  return getSafetyFlags(prescription).some((flag) => {
+    const severity = getSeverity(flag);
+
+    return (
+      severity === "high" ||
+      severity === "error" ||
+      severity === "medium" ||
+      severity === "warning"
+    );
+  });
+}
+
+function hasInteraction(
+  prescription: Prescription
+): boolean {
   return getSafetyFlags(prescription).some(
     (flag) =>
       flag.type === "drug_interaction" ||
@@ -102,28 +146,30 @@ function hasInteraction(prescription: Prescription): boolean {
 function averageConfidence(
   medicines: Medicine[]
 ): number | null {
-  const values: number[] = [];
+  const perMedicine: number[] = [];
 
   for (const medicine of medicines) {
-    if (medicine.extraction_confidence !== null) {
-      values.push(medicine.extraction_confidence);
-    }
+    const extraction = medicine.extraction_confidence;
+    const normalization = medicine.normalization_confidence;
 
-    if (medicine.normalization_confidence !== null) {
-      values.push(medicine.normalization_confidence);
+    const values = [extraction, normalization].filter(
+      (v): v is number => v !== null && v !== undefined
+    );
+
+    if (values.length > 0) {
+      perMedicine.push(
+        values.reduce((sum, v) => sum + v, 0) / values.length
+      );
     }
   }
 
-  if (values.length === 0) {
+  if (perMedicine.length === 0) {
     return null;
   }
 
-  const total = values.reduce(
-    (sum, value) => sum + value,
-    0
+  return (
+    perMedicine.reduce((sum, v) => sum + v, 0) / perMedicine.length
   );
-
-  return total / values.length;
 }
 
 function getConfidenceLabel(
@@ -176,9 +222,12 @@ export default function HistoryPage() {
   const [hasMore, setHasMore] = useState(true);
 
   const [search, setSearch] = useState("");
-  const [statusFilter, setStatusFilter] = useState("all");
-  const [safetyFilter, setSafetyFilter] = useState("all");
-  const [filtersReady, setFiltersReady] = useState(false);
+  const [statusFilter, setStatusFilter] =
+    useState("all");
+  const [safetyFilter, setSafetyFilter] =
+    useState("all");
+  const [filtersReady, setFiltersReady] =
+    useState(false);
 
   useEffect(() => {
     if (!isAuthenticated()) {
@@ -186,7 +235,9 @@ export default function HistoryPage() {
       return;
     }
 
-    const params = new URLSearchParams(window.location.search);
+    const params = new URLSearchParams(
+      window.location.search
+    );
 
     setSearch(params.get("search") || "");
 
@@ -213,10 +264,13 @@ export default function HistoryPage() {
       );
 
       if (!response.ok) {
-        throw new Error("Failed to load prescription history.");
+        throw new Error(
+          "Failed to load prescription history."
+        );
       }
 
-      const data = (await response.json()) as Prescription[];
+      const data =
+        (await response.json()) as Prescription[];
 
       if (offset === 0) {
         setPrescriptions(data);
@@ -233,7 +287,9 @@ export default function HistoryPage() {
       if (err instanceof Error) {
         setError(err.message);
       } else {
-        setError("Failed to load prescription history.");
+        setError(
+          "Failed to load prescription history."
+        );
       }
     } finally {
       setLoading(false);
@@ -265,7 +321,11 @@ export default function HistoryPage() {
       ? `/history?${queryString}`
       : "/history";
 
-    window.history.replaceState(null, "", newUrl);
+    window.history.replaceState(
+      null,
+      "",
+      newUrl
+    );
   }, [
     search,
     statusFilter,
@@ -307,19 +367,20 @@ export default function HistoryPage() {
     };
   }, [filtersReady]);
 
-  const filteredPrescriptions = prescriptions.filter(
-    (prescription) => {
+  const filteredPrescriptions =
+    prescriptions.filter((prescription) => {
       const query = search.trim().toLowerCase();
 
       if (query) {
-        const medicineNames = prescription.medicines
-          .map((medicine) =>
-            [
-              medicine.name,
-              medicine.generic_name || "",
-            ].join(" ")
-          )
-          .join(" ");
+        const medicineNames =
+          prescription.medicines
+            .map((medicine) =>
+              [
+                medicine.name,
+                medicine.generic_name || "",
+              ].join(" ")
+            )
+            .join(" ");
 
         const searchableText = [
           prescription.prescription_id,
@@ -336,7 +397,7 @@ export default function HistoryPage() {
       }
 
       if (statusFilter === "review_required") {
-        if (getSafetyFlags(prescription).length === 0) {
+        if (!requiresReview(prescription)) {
           return false;
         }
       }
@@ -371,15 +432,19 @@ export default function HistoryPage() {
         }
       }
 
-      if (safetyFilter === "no_safety_findings") {
-        if (getSafetyFlags(prescription).length !== 0) {
+      if (
+        safetyFilter ===
+        "no_safety_findings"
+      ) {
+        if (
+          getSafetyFlags(prescription).length !== 0
+        ) {
           return false;
         }
       }
 
       return true;
-    }
-  );
+    });
 
   const totalMedicines = prescriptions.reduce(
     (total, prescription) =>
@@ -387,14 +452,16 @@ export default function HistoryPage() {
     0
   );
 
-  const prescriptionsWithSafety = prescriptions.filter(
-    (prescription) =>
-      getSafetyFlags(prescription).length > 0
-  ).length;
+  const prescriptionsWithSafety =
+    prescriptions.filter(
+      (prescription) =>
+        getSafetyFlags(prescription).length > 0
+    ).length;
 
-  const highPriorityPrescriptions = prescriptions.filter(
-    (prescription) => hasHighPriority(prescription)
-  ).length;
+  const highPriorityPrescriptions =
+    prescriptions.filter((prescription) =>
+      hasHighPriority(prescription)
+    ).length;
 
   return (
     <main className="min-h-screen bg-[#F4F7F5] text-[#17211D]">
@@ -492,7 +559,8 @@ export default function HistoryPage() {
             </h3>
 
             <p className="mt-2 text-xs text-[#9AA4A0]">
-              Upload your first prescription to get started.
+              Upload your first prescription to get
+              started.
             </p>
 
             <Link
@@ -527,7 +595,7 @@ export default function HistoryPage() {
 
               <div className="rounded-2xl border border-[#DFE6E1] bg-white px-5 py-4">
                 <div className="text-[10px] font-semibold uppercase tracking-[0.14em] text-[#8A948F]">
-                  Safety alerts
+                  Safety findings
                 </div>
 
                 <div className="mt-2 text-2xl font-semibold text-[#A74646]">
@@ -560,7 +628,9 @@ export default function HistoryPage() {
                     id="history-search"
                     type="text"
                     value={search}
-                    onChange={(event) => setSearch(event.target.value)}
+                    onChange={(event) =>
+                      setSearch(event.target.value)
+                    }
                     placeholder="Search by prescription ID, medicine, or file name"
                     className="h-11 w-full rounded-xl border border-[#DFE6E1] bg-[#FAFCFB] px-4 text-sm text-[#17211D] outline-none placeholder:text-[#9AA39E] focus:border-[#9AAEA4] focus:bg-white"
                   />
@@ -577,14 +647,32 @@ export default function HistoryPage() {
                   <select
                     id="history-status"
                     value={statusFilter}
-                    onChange={(event) => setStatusFilter(event.target.value)}
+                    onChange={(event) =>
+                      setStatusFilter(
+                        event.target.value
+                      )
+                    }
                     className="h-11 w-full rounded-xl border border-[#DFE6E1] bg-[#FAFCFB] px-4 text-sm text-[#17211D] outline-none focus:border-[#9AAEA4] focus:bg-white"
                   >
-                    <option value="all">All</option>
-                    <option value="review_required">Review required</option>
-                    <option value="analyzed">Analyzed</option>
-                    <option value="uploaded">Uploaded</option>
-                    <option value="ocr_failed">OCR failed</option>
+                    <option value="all">
+                      All
+                    </option>
+
+                    <option value="review_required">
+                      Review required
+                    </option>
+
+                    <option value="analyzed">
+                      Analyzed
+                    </option>
+
+                    <option value="uploaded">
+                      Uploaded
+                    </option>
+
+                    <option value="ocr_failed">
+                      OCR failed
+                    </option>
                   </select>
                 </div>
 
@@ -600,13 +688,28 @@ export default function HistoryPage() {
                     <select
                       id="history-safety"
                       value={safetyFilter}
-                      onChange={(event) => setSafetyFilter(event.target.value)}
+                      onChange={(event) =>
+                        setSafetyFilter(
+                          event.target.value
+                        )
+                      }
                       className="h-11 rounded-xl border border-[#DFE6E1] bg-white px-3 text-sm text-[#17211D] outline-none transition focus:border-[#35664D]"
                     >
-                      <option value="all">All safety</option>
-                      <option value="high_priority">High priority</option>
-                      <option value="interactions">Interactions</option>
-                      <option value="no_safety_findings">No safety findings</option>
+                      <option value="all">
+                        All safety
+                      </option>
+
+                      <option value="high_priority">
+                        High priority
+                      </option>
+
+                      <option value="interactions">
+                        Interactions
+                      </option>
+
+                      <option value="no_safety_findings">
+                        No safety findings
+                      </option>
                     </select>
                   </div>
 
@@ -627,7 +730,7 @@ export default function HistoryPage() {
                   )}
                 </div>
               </div>
-                </div>
+            </div>
 
             {filteredPrescriptions.length === 0 ? (
               <div className="mt-8 rounded-2xl border border-dashed border-[#DFE6E1] bg-white px-8 py-16 text-center">
@@ -636,7 +739,8 @@ export default function HistoryPage() {
                 </h3>
 
                 <p className="mt-2 text-xs text-[#9AA4A0]">
-                  Try another search term or change the filters.
+                  Try another search term or change the
+                  filters.
                 </p>
 
                 <button
@@ -687,13 +791,18 @@ export default function HistoryPage() {
 
                     <tbody>
                       {filteredPrescriptions.map(
-                        (prescription, index) => {
+                        (
+                          prescription,
+                          index
+                        ) => {
                           const status = getStatus(
                             prescription.status
                           );
 
                           const safetyFlags =
-                            getSafetyFlags(prescription);
+                            getSafetyFlags(
+                              prescription
+                            );
 
                           const confidence =
                             averageConfidence(
@@ -701,10 +810,24 @@ export default function HistoryPage() {
                             );
 
                           const highPriority =
-                            hasHighPriority(prescription);
+                            hasHighPriority(
+                              prescription
+                            );
+
+                          const caution =
+                            hasCautionFinding(
+                              prescription
+                            );
+
+                          const reviewRequired =
+                            requiresReview(
+                              prescription
+                            );
 
                           const interaction =
-                            hasInteraction(prescription);
+                            hasInteraction(
+                              prescription
+                            );
 
                           return (
                             <tr
@@ -748,12 +871,28 @@ export default function HistoryPage() {
                                     High-priority finding
                                   </div>
                                 )}
+
+                                {!highPriority &&
+                                  reviewRequired && (
+                                    <div className="mt-1.5 text-[10px] text-[#A47B2C]">
+                                      Review required
+                                    </div>
+                                  )}
+
+                                {!reviewRequired &&
+                                  safetyFlags.length >
+                                    0 && (
+                                    <div className="mt-1.5 text-[10px] text-[#7C8881]">
+                                      Informational finding
+                                    </div>
+                                  )}
                               </td>
 
                               <td className="px-5 py-5 text-right">
                                 <div className="text-xs font-medium">
                                   {
-                                    prescription.medicines
+                                    prescription
+                                      .medicines
                                       .length
                                   }
                                 </div>
@@ -769,7 +908,8 @@ export default function HistoryPage() {
                               </td>
 
                               <td className="px-5 py-5 text-right">
-                                {safetyFlags.length === 0 ? (
+                                {safetyFlags.length ===
+                                0 ? (
                                   <span className="text-xs text-[#9AA39E]">
                                     0
                                   </span>
@@ -779,16 +919,22 @@ export default function HistoryPage() {
                                       className={`text-xs font-semibold ${
                                         highPriority
                                           ? "text-[#A74646]"
-                                          : "text-[#A47B2C]"
+                                          : caution
+                                            ? "text-[#A47B2C]"
+                                            : "text-[#526158]"
                                       }`}
                                     >
-                                      {safetyFlags.length}
+                                      {
+                                        safetyFlags.length
+                                      }
                                     </div>
 
                                     <div className="mt-1 text-[10px] text-[#8A948F]">
                                       {interaction
                                         ? "Interaction"
-                                        : "Findings"}
+                                        : caution
+                                          ? "Caution"
+                                          : "Informational"}
                                     </div>
                                   </div>
                                 )}
@@ -805,7 +951,8 @@ export default function HistoryPage() {
                                   )}
                                 </div>
 
-                                {confidence !== null && (
+                                {confidence !==
+                                  null && (
                                   <div className="mt-1 text-[10px] text-[#9AA39E]">
                                     {Math.round(
                                       confidence * 100
@@ -835,7 +982,9 @@ export default function HistoryPage() {
                   <div className="border-t border-[#EDF0EE] px-5 py-4 text-center">
                     <button
                       type="button"
-                      onClick={() => loadPage(skip)}
+                      onClick={() =>
+                        loadPage(skip)
+                      }
                       disabled={loading}
                       className="text-xs font-medium text-[#526C5D] hover:underline disabled:opacity-50"
                     >
@@ -852,11 +1001,11 @@ export default function HistoryPage() {
 
         {prescriptions.length > 0 && (
           <div className="mt-8 border-t border-[#DFE6E1] pt-5 text-[10px] leading-5 text-[#8A948F]">
-            Prescription Intelligence provides AI-generated
-            decision support only. Medicine identification and
-            extraction do not constitute clinical approval.
-            Pharmacist verification is required before
-            dispensing or clinical use.
+            Prescription Intelligence provides
+            AI-generated decision support only. Medicine
+            identification and extraction do not constitute
+            clinical approval. Pharmacist verification is
+            required before dispensing or clinical use.
           </div>
         )}
       </div>
