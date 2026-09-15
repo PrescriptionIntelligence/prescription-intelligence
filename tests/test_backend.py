@@ -12,6 +12,8 @@ Tests cover:
 
 These tests do NOT require a running database or Tesseract.
 """
+from urllib import response
+
 import pytest
 
 # =========================================================
@@ -787,7 +789,13 @@ from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
 from backend.database import Base, get_db
-from backend.models import UserDB, OrganizationDB, PrescriptionDB, ReviewAuditDB
+from backend.models import (
+    UserDB,
+    OrganizationDB,
+    CustomerDB,
+    PrescriptionDB,
+    ReviewAuditDB,
+)
 from backend.security import hash_password
 from backend.routers.auth import _authenticate
 
@@ -1534,7 +1542,6 @@ def test_missing_review_prescription_returns_404(test_app):
     assert response.status_code == 404
     assert response.json()["detail"] == "Prescription not found"
 
-
 def test_review_requires_authentication(
     test_app,
     review_prescription,
@@ -1855,3 +1862,435 @@ def test_review_rejects_invalid_finding_index(
 
     assert response.status_code == 400
     assert "finding index" in response.json()["detail"].lower()
+
+# =========================================================
+# Prescription authorization / tenant isolation tests
+# =========================================================
+
+@pytest.fixture(scope="module")
+def prescription_access_scenario(auth_db_session):
+    """
+    Build an isolated multi-tenant prescription scenario.
+
+    Organization A:
+        - Pharmacist A
+        - Customer A
+        - Prescription A
+
+    Organization B:
+        - Pharmacist B
+        - Customer B
+        - Prescription B
+
+    Admin:
+        - Global access
+    """
+
+    # -----------------------------------------------------
+    # Organizations
+    # -----------------------------------------------------
+
+    org_a = OrganizationDB(
+        name="Access Test Pharmacy A",
+        slug="access-test-pharmacy-a",
+    )
+
+    org_b = OrganizationDB(
+        name="Access Test Pharmacy B",
+        slug="access-test-pharmacy-b",
+    )
+
+    auth_db_session.add_all([org_a, org_b])
+    auth_db_session.flush()
+
+    # -----------------------------------------------------
+    # Pharmacists
+    # -----------------------------------------------------
+
+    pharmacist_a = UserDB(
+        organization_id=org_a.id,
+        name="Access Pharmacist A",
+        email="access-pharmacist-a@example.com",
+        password_hash=hash_password("password-a"),
+        role="pharmacist",
+        is_active=True,
+        email_verified=True,
+    )
+
+    pharmacist_b = UserDB(
+        organization_id=org_b.id,
+        name="Access Pharmacist B",
+        email="access-pharmacist-b@example.com",
+        password_hash=hash_password("password-b"),
+        role="pharmacist",
+        is_active=True,
+        email_verified=True,
+    )
+
+    # -----------------------------------------------------
+    # Admin
+    # -----------------------------------------------------
+
+    admin = UserDB(
+        organization_id=None,
+        name="Access Admin",
+        email="access-admin@example.com",
+        password_hash=hash_password("password-admin"),
+        role="admin",
+        is_active=True,
+        email_verified=True,
+    )
+
+    # -----------------------------------------------------
+    # Customer accounts
+    # -----------------------------------------------------
+
+    customer_user_a = UserDB(
+        organization_id=None,
+        name="Access Customer A",
+        email="access-customer-a@example.com",
+        password_hash=hash_password("password-customer-a"),
+        role="customer",
+        is_active=True,
+        email_verified=True,
+    )
+
+    customer_user_b = UserDB(
+        organization_id=None,
+        name="Access Customer B",
+        email="access-customer-b@example.com",
+        password_hash=hash_password("password-customer-b"),
+        role="customer",
+        is_active=True,
+        email_verified=True,
+    )
+
+    auth_db_session.add_all(
+        [
+            pharmacist_a,
+            pharmacist_b,
+            admin,
+            customer_user_a,
+            customer_user_b,
+        ]
+    )
+    auth_db_session.flush()
+
+    # -----------------------------------------------------
+    # Customer profiles
+    # -----------------------------------------------------
+
+    customer_a = CustomerDB(
+        user_id=customer_user_a.id,
+        organization_id=org_a.id,
+        customer_code="ACCESS-CUSTOMER-A",
+        name="Access Customer A",
+    )
+
+    customer_b = CustomerDB(
+        user_id=customer_user_b.id,
+        organization_id=org_b.id,
+        customer_code="ACCESS-CUSTOMER-B",
+        name="Access Customer B",
+    )
+
+    auth_db_session.add_all([customer_a, customer_b])
+    auth_db_session.flush()
+
+    # -----------------------------------------------------
+    # Prescriptions
+    # -----------------------------------------------------
+
+    prescription_a = PrescriptionDB(
+        prescription_id="RX-ACCESS-ORG-A",
+        organization_id=org_a.id,
+        uploaded_by_id=pharmacist_a.id,
+        customer_id=customer_a.id,
+        raw_text="Paracetamol 500 mg",
+        status="analyzed",
+        review_status="pending",
+        safety_flags=[],
+        file_name="access-a.txt",
+        file_type="text/plain",
+    )
+
+    prescription_b = PrescriptionDB(
+        prescription_id="RX-ACCESS-ORG-B",
+        organization_id=org_b.id,
+        uploaded_by_id=pharmacist_b.id,
+        customer_id=customer_b.id,
+        raw_text="Amoxicillin 500 mg",
+        status="analyzed",
+        review_status="pending",
+        safety_flags=[],
+        file_name="access-b.txt",
+        file_type="text/plain",
+    )
+
+    auth_db_session.add_all(
+        [prescription_a, prescription_b]
+    )
+    auth_db_session.commit()
+
+    auth_db_session.refresh(pharmacist_a)
+    auth_db_session.refresh(pharmacist_b)
+    auth_db_session.refresh(admin)
+    auth_db_session.refresh(customer_user_a)
+    auth_db_session.refresh(customer_user_b)
+    auth_db_session.refresh(prescription_a)
+    auth_db_session.refresh(prescription_b)
+
+    return {
+        "pharmacist_a": pharmacist_a,
+        "pharmacist_b": pharmacist_b,
+        "admin": admin,
+        "customer_user_a": customer_user_a,
+        "customer_user_b": customer_user_b,
+        "prescription_a": prescription_a,
+        "prescription_b": prescription_b,
+    }
+
+
+def _login_for_access_test(client, email, password):
+    response = client.post(
+        "/auth/login",
+        json={
+            "email": email,
+            "password": password,
+        },
+    )
+
+    assert response.status_code == 200
+
+    return response.json()["access_token"]
+
+
+class TestPrescriptionAuthorization:
+
+    def test_pharmacist_can_access_same_organization_prescription(
+        self,
+        test_app,
+        prescription_access_scenario,
+    ):
+        scenario = prescription_access_scenario
+
+        token = _login_for_access_test(
+            test_app,
+            "access-pharmacist-a@example.com",
+            "password-a",
+        )
+
+        response = test_app.get(
+            f"/prescriptions/{scenario['prescription_a'].prescription_id}",
+            headers={
+                "Authorization": f"Bearer {token}",
+            },
+        )
+
+        assert response.status_code == 200
+        assert (
+            response.json()["prescription_id"]
+            == "RX-ACCESS-ORG-A"
+        )
+
+    def test_pharmacist_cannot_access_different_organization_prescription(
+        self,
+        test_app,
+        prescription_access_scenario,
+    ):
+        scenario = prescription_access_scenario
+
+        token = _login_for_access_test(
+            test_app,
+            "access-pharmacist-a@example.com",
+            "password-a",
+        )
+
+        response = test_app.get(
+            f"/prescriptions/{scenario['prescription_b'].prescription_id}",
+            headers={
+                "Authorization": f"Bearer {token}",
+            },
+        )
+
+        assert response.status_code == 404
+        assert response.json()["detail"] == "Prescription not found"
+
+    def test_customer_can_access_own_prescription(
+        self,
+        test_app,
+        prescription_access_scenario,
+    ):
+        scenario = prescription_access_scenario
+
+        token = _login_for_access_test(
+            test_app,
+            "access-customer-a@example.com",
+            "password-customer-a",
+        )
+
+        response = test_app.get(
+            f"/prescriptions/{scenario['prescription_a'].prescription_id}",
+            headers={
+                "Authorization": f"Bearer {token}",
+            },
+        )
+
+        assert response.status_code == 200
+        assert (
+            response.json()["prescription_id"]
+            == "RX-ACCESS-ORG-A"
+        )
+
+    def test_customer_cannot_access_another_customers_prescription(
+        self,
+        test_app,
+        prescription_access_scenario,
+    ):
+        scenario = prescription_access_scenario
+
+        token = _login_for_access_test(
+            test_app,
+            "access-customer-a@example.com",
+            "password-customer-a",
+        )
+
+        response = test_app.get(
+            f"/prescriptions/{scenario['prescription_b'].prescription_id}",
+            headers={
+                "Authorization": f"Bearer {token}",
+            },
+        )
+
+        assert response.status_code == 404
+        assert response.json()["detail"] == "Prescription not found"
+
+    def test_admin_can_access_any_prescription(
+        self,
+        test_app,
+        prescription_access_scenario,
+    ):
+        scenario = prescription_access_scenario
+
+        token = _login_for_access_test(
+            test_app,
+            "access-admin@example.com",
+            "password-admin",
+        )
+
+        response_a = test_app.get(
+            f"/prescriptions/{scenario['prescription_a'].prescription_id}",
+            headers={
+                "Authorization": f"Bearer {token}",
+            },
+        )
+
+        response_b = test_app.get(
+            f"/prescriptions/{scenario['prescription_b'].prescription_id}",
+            headers={
+                "Authorization": f"Bearer {token}",
+            },
+        )
+
+        assert response_a.status_code == 200
+        assert response_b.status_code == 200
+
+    def test_pharmacist_cannot_review_different_organization_prescription(
+        self,
+        test_app,
+        prescription_access_scenario,
+    ):
+        scenario = prescription_access_scenario
+
+        token = _login_for_access_test(
+            test_app,
+            "access-pharmacist-a@example.com",
+            "password-a",
+        )
+
+        response = test_app.post(
+            f"/prescriptions/{scenario['prescription_b'].prescription_id}/review",
+            headers={
+                "Authorization": f"Bearer {token}",
+            },
+            json={
+                "action": "start_review",
+            },
+        )
+
+        assert response.status_code == 403
+        assert response.json()["detail"] == (
+            "You do not have access to this prescription."
+        )
+
+    def test_pharmacist_cannot_read_different_organization_review_history(
+        self,
+        test_app,
+        prescription_access_scenario,
+    ):
+        scenario = prescription_access_scenario
+
+        token = _login_for_access_test(
+            test_app,
+            "access-pharmacist-a@example.com",
+            "password-a",
+        )
+
+        response = test_app.get(
+            f"/prescriptions/{scenario['prescription_b'].prescription_id}/review/history",
+            headers={
+                "Authorization": f"Bearer {token}",
+            },
+        )
+
+        assert response.status_code == 403
+        assert response.json()["detail"] == (
+            "You do not have access to this prescription."
+        )
+
+    def test_pharmacist_cannot_download_different_organization_report(
+        self,
+        test_app,
+        prescription_access_scenario,
+    ):
+        scenario = prescription_access_scenario
+
+        token = _login_for_access_test(
+            test_app,
+            "access-pharmacist-a@example.com",
+            "password-a",
+        )
+
+        response = test_app.get(
+            f"/prescriptions/{scenario['prescription_b'].prescription_id}/report",
+            headers={
+                "Authorization": f"Bearer {token}",
+            },
+        )
+
+        assert response.status_code == 404
+        assert response.json()["detail"] == "Prescription not found"
+
+    def test_customer_cannot_download_another_customers_report(
+        self,
+        test_app,
+        prescription_access_scenario,
+    ):
+        scenario = prescription_access_scenario
+
+        token = _login_for_access_test(
+            test_app,
+            "access-customer-a@example.com",
+            "password-customer-a",
+        )
+
+        response = test_app.get(
+            f"/prescriptions/{scenario['prescription_b'].prescription_id}/report",
+            headers={
+                "Authorization": f"Bearer {token}",
+            },
+        )
+
+        assert response.status_code == 404
+        assert response.json()["detail"] == "Prescription not found"
+
