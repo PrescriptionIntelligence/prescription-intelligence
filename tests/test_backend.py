@@ -2434,3 +2434,182 @@ class TestPrescriptionAuthorization:
         assert response.status_code == 404
         assert response.json()["detail"] == "Prescription not found"
 
+class TestPrescriptionExtractionAudit:
+    """
+    Production-oriented regression coverage for prescription
+    extraction boundaries and structured medication fields.
+    """
+
+    def test_two_medicines_with_different_schedules(self):
+        result = process_prescription(
+            "1. Amoxicillin 500 mg\n"
+            "Take 1 capsule three times daily for 5 days.\n"
+            "\n"
+            "2. Paracetamol 500 mg\n"
+            "Take 1 tablet twice daily for 3 days."
+        )
+
+        assert len(result["medicines"]) == 2
+
+        first = result["medicines"][0]
+        second = result["medicines"][1]
+
+        assert first["generic_name"] == "Amoxicillin"
+        assert first["strength_value"] == 500.0
+        assert first["strength_unit"] == "mg"
+        assert first["dose_value"] == 1
+        assert first["dose_unit"] == "capsule"
+        assert first["frequency_value"] == 3
+        assert first["frequency_unit"] == "daily"
+        assert first["duration_value"] == 5.0
+        assert first["duration_unit"] == "days"
+
+        assert second["generic_name"] == "Paracetamol"
+        assert second["strength_value"] == 500.0
+        assert second["strength_unit"] == "mg"
+        assert second["dose_value"] == 1
+        assert second["dose_unit"] == "tablet"
+        assert second["frequency_value"] == 2
+        assert second["frequency_unit"] == "daily"
+        assert second["duration_value"] == 3.0
+        assert second["duration_unit"] == "days"
+
+    def test_numeric_schedule_is_preserved_as_frequency(self):
+        result = process_prescription(
+            "Pantoprazole 40 mg\n"
+            "1-0-1\n"
+            "For 5 days."
+        )
+
+        assert len(result["medicines"]) == 1
+
+        medicine = result["medicines"][0]
+
+        assert medicine["generic_name"] == "Pantoprazole"
+        assert medicine["strength_value"] == 40.0
+        assert medicine["strength_unit"] == "mg"
+        assert medicine["frequency_value"] == 2
+        assert medicine["frequency_unit"] == "daily"
+        assert medicine["duration_value"] == 5.0
+        assert medicine["duration_unit"] == "days"
+
+    def test_same_line_medicine_instruction_is_structured(self):
+        result = process_prescription(
+            "Pantoprazole 40 mg once daily before breakfast"
+        )
+
+        assert len(result["medicines"]) == 1
+
+        medicine = result["medicines"][0]
+
+        assert medicine["generic_name"] == "Pantoprazole"
+        assert medicine["strength_value"] == 40.0
+        assert medicine["strength_unit"] == "mg"
+        assert medicine["frequency_value"] == 1
+        assert medicine["frequency_unit"] == "daily"
+
+        instructions = medicine["instructions"] or ""
+
+        assert "before breakfast" in instructions.lower()
+
+    def test_prescription_metadata_does_not_leak_into_medicine(self):
+        result = process_prescription(
+            "Amoxicillin 500 mg\n"
+            "Take 1 capsule three times daily.\n"
+            "Diagnosis: Upper respiratory infection\n"
+            "Advice: Complete the full course.\n"
+            "Paracetamol 500 mg\n"
+            "Take 1 tablet twice daily."
+        )
+
+        assert len(result["medicines"]) == 2
+
+        first = result["medicines"][0]
+        second = result["medicines"][1]
+
+        first_instructions = first["instructions"] or ""
+        second_instructions = second["instructions"] or ""
+
+        assert "Diagnosis:" not in first_instructions
+        assert "Upper respiratory infection" not in first_instructions
+        assert "Advice:" not in first_instructions
+        assert "Complete the full course." not in first_instructions
+
+        assert "Diagnosis:" not in second_instructions
+        assert "Advice:" not in second_instructions
+
+    def test_dosage_form_prefix_is_normalized(self):
+        result = process_prescription(
+            "Tab Pantoprazole 40 mg once daily\n"
+            "Cap Amoxicillin 500 mg twice daily"
+        )
+
+        assert len(result["medicines"]) == 2
+
+        first = result["medicines"][0]
+        second = result["medicines"][1]
+
+        assert first["generic_name"] == "Pantoprazole"
+        assert first["dose_unit"] == "tablet"
+
+        assert second["generic_name"] == "Amoxicillin"
+        assert second["dose_unit"] == "capsule"
+
+    def test_route_is_not_confused_with_frequency(self):
+        result = process_prescription(
+            "Amoxicillin 500 mg orally three times daily"
+        )
+
+        assert len(result["medicines"]) == 1
+
+        medicine = result["medicines"][0]
+
+        assert medicine["generic_name"] == "Amoxicillin"
+        assert medicine["route"] == "oral"
+        assert medicine["frequency_value"] == 3
+        assert medicine["frequency_unit"] == "daily"
+
+    def test_zero_schedule_does_not_create_fake_medicine(self):
+        result = process_prescription(
+            "Pantoprazole 40 mg\n"
+            "0-0-1"
+        )
+
+        assert len(result["medicines"]) == 1
+
+        medicine = result["medicines"][0]
+
+        assert medicine["generic_name"] == "Pantoprazole"
+        assert medicine["frequency_value"] == 1
+        assert medicine["frequency_unit"] == "daily"
+
+    def test_prescription_with_header_metadata(self):
+        result = process_prescription(
+            "Patient: Rahul\n"
+            "Date: 15/09/2026\n"
+            "Diagnosis: Gastritis\n"
+            "\n"
+            "Pantoprazole 40 mg\n"
+            "Take 1 tablet once daily before breakfast."
+        )
+
+        assert len(result["medicines"]) == 1
+
+        medicine = result["medicines"][0]
+
+        assert medicine["generic_name"] == "Pantoprazole"
+        assert medicine["strength_value"] == 40.0
+        assert medicine["frequency_value"] == 1
+        assert medicine["frequency_unit"] == "daily"
+
+    def test_noisy_medicine_does_not_silently_become_unrelated_medicine(self):
+        result = process_prescription(
+            "Pantoprazol 40 mg once daily"
+        )
+
+        assert len(result["medicines"]) == 1
+
+        medicine = result["medicines"][0]
+
+        assert medicine["generic_name"] == "Pantoprazole"
+        assert medicine["confidence"] > 0
