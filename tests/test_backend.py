@@ -2613,3 +2613,112 @@ class TestPrescriptionExtractionAudit:
 
         assert medicine["generic_name"] == "Pantoprazole"
         assert medicine["confidence"] > 0
+
+class TestSpatialOCRMedicineEvidence:
+    def test_empty_ocr_data_returns_no_spatial_evidence(self):
+        from backend.services.ocr_spatial_evidence import (
+            extract_spatial_medicine_evidence,
+        )
+        from backend.services.medicine_normalizer import (
+            load_medicine_vocabulary,
+        )
+
+        vocabulary = load_medicine_vocabulary()
+
+        result = extract_spatial_medicine_evidence(
+            [],
+            vocabulary,
+        )
+
+        assert result["score"] == 0.0
+        assert result["matched_blocks"] == 0
+        assert result["strong_matches"] == 0
+        assert result["candidates"] == []
+
+    def test_spatial_evidence_preserves_no_medicine_claim_for_garbage(self):
+        from backend.services.ocr_spatial_evidence import (
+            extract_spatial_medicine_evidence,
+        )
+        from backend.services.medicine_normalizer import (
+            load_medicine_vocabulary,
+        )
+
+        vocabulary = load_medicine_vocabulary()
+
+        ocr_data = [
+            {
+                "text": "xqz",
+                "confidence": 88.0,
+                "left": 100,
+                "top": 100,
+                "width": 25,
+                "height": 12,
+            },
+            {
+                "text": "random",
+                "confidence": 84.0,
+                "left": 135,
+                "top": 100,
+                "width": 45,
+                "height": 12,
+            },
+        ]
+
+        result = extract_spatial_medicine_evidence(
+            ocr_data,
+            vocabulary,
+        )
+
+        assert result["matched_blocks"] == 0
+        assert result["score"] == 0.0
+
+    def test_spatial_evidence_detects_known_medicine_text(self):
+        from backend.services.ocr_spatial_evidence import (
+            extract_spatial_medicine_evidence,
+        )
+        from backend.services.medicine_normalizer import (
+            load_medicine_vocabulary,
+        )
+
+        vocabulary = load_medicine_vocabulary()
+
+        ocr_data = [
+            {
+                "text": "Paracetamol",
+                "confidence": 92.0,
+                "left": 100,
+                "top": 100,
+                "width": 100,
+                "height": 20,
+            },
+            {
+                "text": "500",
+                "confidence": 95.0,
+                "left": 210,
+                "top": 100,
+                "width": 35,
+                "height": 20,
+            },
+            {
+                "text": "mg",
+                "confidence": 95.0,
+                "left": 250,
+                "top": 100,
+                "width": 25,
+                "height": 20,
+            },
+        ]
+
+        result = extract_spatial_medicine_evidence(
+            ocr_data,
+            vocabulary,
+        )
+
+        assert result["matched_blocks"] >= 1
+        assert result["score"] >= 0.85
+        assert result["candidates"]
+        assert any(
+            "paracetamol"
+            in candidate["candidate"].lower()
+            for candidate in result["candidates"]
+        )

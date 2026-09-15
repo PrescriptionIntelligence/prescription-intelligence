@@ -3,6 +3,14 @@ import re
 from PIL import Image, ImageEnhance, ImageFilter, ImageOps
 import pytesseract
 
+from backend.services.medicine_normalizer import (
+    load_medicine_vocabulary,
+    _estimate_best_score,
+)
+
+from backend.services.ocr_spatial_evidence import (
+    extract_spatial_medicine_evidence,
+)
 
 # ---------------------------------------------------------------------------
 # Basic preprocessing
@@ -253,6 +261,295 @@ def _score_ocr_text(text: str) -> int:
 
 
 # ---------------------------------------------------------------------------
+# Medicine-aware OCR evidence
+# ---------------------------------------------------------------------------
+
+_MEDICINE_EVIDENCE_THRESHOLD = 0.85
+
+_MEDICINE_LINE_CLEANUP_RE = re.compile(
+    r"\b(?:tab(?:let)?|cap(?:sule)?|caps(?:ule)?|"
+    r"inj(?:ection)?|syp(?:rup)?)\b",
+    re.IGNORECASE,
+)
+
+_MEDICINE_STRENGTH_CLEANUP_RE = re.compile(
+    r"\b\d+(?:\.\d+)?"
+    r"(?:\s*\+\s*\d+(?:\.\d+)?)?"
+    r"\s*(?:mg|mcg|g|ml|%)\b",
+    re.IGNORECASE,
+)
+
+_MEDICINE_DOSE_CLEANUP_RE = re.compile(
+    r"\b\d+(?:\.\d+)?\s*"
+    r"(?:tablet|tablets|tab|capsule|capsules|cap|"
+    r"ml|milliliter|milliliters|drop|drops|puff|puffs|"
+    r"unit|units)\b",
+    re.IGNORECASE,
+)
+
+_MEDICINE_SCHEDULE_RE = re.compile(
+    r"\b\d+(?:\.\d+)?"
+    r"(?:\s*[-/:]\s*\d+(?:\.\d+)?){1,2}\b"
+)
+
+
+def _prepare_medicine_evidence_line(
+    line: str,
+) -> str:
+    """
+    Remove obvious prescription fields from one OCR line before
+    medicine-vocabulary comparison.
+
+    This is intentionally lightweight and does not identify medicines.
+    It only prepares OCR text for an evidence estimate.
+    """
+
+    if not line:
+        return ""
+
+    candidate = line.strip()
+
+    candidate = _MEDICINE_LINE_CLEANUP_RE.sub(
+        " ",
+        candidate,
+    )
+
+    candidate = _MEDICINE_STRENGTH_CLEANUP_RE.sub(
+        " ",
+        candidate,
+    )
+
+    candidate = _MEDICINE_DOSE_CLEANUP_RE.sub(
+        " ",
+        candidate,
+    )
+
+    candidate = _MEDICINE_SCHEDULE_RE.sub(
+        " ",
+        candidate,
+    )
+
+    candidate = re.sub(
+        r"\b(?:dose|frequency|duration|instructions?)\s*:",
+        " ",
+        candidate,
+        flags=re.IGNORECASE,
+    )
+
+    candidate = re.sub(
+        r"\s+",
+        " ",
+        candidate,
+    ).strip()
+
+    return candidate
+
+
+def _score_medicine_evidence(
+    text: str,
+    vocabulary: list[dict],
+) -> dict:
+    """
+    Estimate medicine-related evidence inside an OCR candidate.
+
+    This is deliberately NOT a medicine identification step.
+
+    It only asks:
+
+        "Does this OCR candidate contain one or more lines that
+         resemble entries in the existing local medicine vocabulary?"
+
+    The existing medicine normalizer performs the actual normalization
+    later in the prescription pipeline.
+
+    Returns:
+
+        {
+            "score": float,
+            "matched_lines": int,
+            "strong_matches": int,
+            "line_scores": [...]
+        }
+    """
+
+    if not text or not vocabulary:
+        return {
+            "score": 0.0,
+            "matched_lines": 0,
+            "strong_matches": 0,
+            "line_scores": [],
+        }
+
+    lines = [
+        line.strip()
+        for line in text.splitlines()
+        if line.strip()
+    ]
+
+    if not lines:
+        return {
+            "score": 0.0,
+            "matched_lines": 0,
+            "strong_matches": 0,
+            "line_scores": [],
+        }
+
+    line_scores = []
+
+    for line in lines:
+
+        prepared = _prepare_medicine_evidence_line(
+            line
+        )
+
+        if not prepared:
+            continue
+
+        # Avoid treating very short OCR fragments as medicine evidence.
+        if len(prepared) < 3:
+            continue
+
+        score = _estimate_best_score(
+            prepared,
+            vocabulary,
+        )
+
+        if score >= _MEDICINE_EVIDENCE_THRESHOLD:
+
+            line_scores.append(
+                {
+                    "text": line,
+                    "score": round(
+                        score,
+                        3,
+                    ),
+                }
+            )
+
+    line_scores.sort(
+        key=lambda item: item["score"],
+        reverse=True,
+    )
+
+    strong_matches = len(line_scores)
+
+    # Count only the strongest few lines so a long OCR document
+    # cannot accumulate unlimited medicine evidence.
+    capped_scores = [
+        item["score"]
+        for item in line_scores[:5]
+    ]
+
+    if not capped_scores:
+        return {
+            "score": 0.0,
+            "matched_lines": 0,
+            "strong_matches": 0,
+            "line_scores": [],
+        }
+
+    # The strongest medicine-like line is the primary evidence.
+    #
+    # Additional strong lines provide diminishing support.
+    medicine_score = capped_scores[0]
+
+    for additional_score in capped_scores[1:]:
+        medicine_score += (
+            additional_score * 0.20
+        )
+
+    # Cap the evidence contribution.
+    medicine_score = min(
+        medicine_score,
+        2.0,
+    )
+
+    return {
+        "score": round(
+            medicine_score,
+            3,
+        ),
+        "matched_lines": len(
+            capped_scores
+        ),
+        "strong_matches": strong_matches,
+        "line_scores": line_scores[:5],
+    }
+
+
+def _calculate_combined_candidate_score(
+    structural_score: int,
+    medicine_evidence: dict,
+) -> float:
+    """
+    Combine structural OCR quality with medicine evidence.
+
+    Structural OCR quality remains the dominant signal.
+
+    Medicine evidence is a bounded bonus rather than a replacement
+    for OCR quality.
+
+    This prevents a tiny accidental medicine-like fragment from
+    dominating an otherwise unusable OCR result.
+    """
+
+    medicine_score = float(
+        medicine_evidence.get(
+            "score",
+            0.0,
+        )
+    )
+
+    matched_lines = int(
+        medicine_evidence.get(
+            "matched_lines",
+            0,
+        )
+    )
+
+    # Primary medicine evidence.
+    bonus = medicine_score * 12.0
+
+    # Additional confirmation from multiple medicine-like lines.
+    if matched_lines >= 2:
+        bonus += min(
+            (matched_lines - 1) * 2.0,
+            6.0,
+        )
+
+    # Keep medicine evidence bounded.
+    bonus = min(
+        bonus,
+        30.0,
+    )
+
+    return round(
+        structural_score + bonus,
+        2,
+    )
+
+
+def _has_reliable_medicine_evidence(
+    medicine_evidence: dict,
+) -> bool:
+    """
+    Return True when an OCR candidate contains at least one strong
+    medicine-vocabulary signal.
+    """
+
+    return bool(
+        medicine_evidence.get(
+            "matched_lines",
+            0,
+        ) > 0
+        and medicine_evidence.get(
+            "score",
+            0.0,
+        ) >= _MEDICINE_EVIDENCE_THRESHOLD
+    )
+
+
+# ---------------------------------------------------------------------------
 # OCR candidate helpers
 # ---------------------------------------------------------------------------
 
@@ -283,14 +580,49 @@ def _run_text_ocr(
         config=f"--psm {psm}",
     )
 
+def _get_spatial_medicine_evidence(
+    processed_image: Image.Image,
+    psm: int,
+    medicine_vocabulary: list[dict],
+) -> dict:
+    """
+    Run word-level OCR for one candidate configuration and generate
+    spatial medicine evidence.
+
+    This is evidence only. It does not resolve or verify medicines.
+    """
+
+    ocr_data = _extract_ocr_data_with_configuration(
+        processed_image,
+        psm,
+    )
+
+    if not ocr_data:
+        return {
+            "score": 0.0,
+            "matched_blocks": 0,
+            "strong_matches": 0,
+            "candidates": [],
+            "blocks": [],
+        }
+
+    return extract_spatial_medicine_evidence(
+        ocr_data,
+        medicine_vocabulary,
+    )
 
 def _make_candidate(
     text: str,
     preprocessing: str,
     psm: int,
+    medicine_vocabulary: list[dict] | None = None,
+    processed_image: Image.Image | None = None,
 ) -> dict | None:
     """
     Build a normalized OCR candidate.
+
+    Medicine-aware evidence is optional so this helper remains compatible
+    with callers that only need structural OCR scoring.
     """
 
     normalized_text = _normalize_ocr_text(text)
@@ -298,12 +630,51 @@ def _make_candidate(
     if not normalized_text:
         return None
 
+    structural_score = _score_ocr_text(
+        normalized_text
+    )
+
+    if medicine_vocabulary is None:
+        medicine_evidence = {
+            "score": 0.0,
+            "matched_lines": 0,
+            "strong_matches": 0,
+            "line_scores": [],
+        }
+    else:
+        if processed_image is not None:
+            medicine_evidence = _get_spatial_medicine_evidence(
+                processed_image,
+                6,
+                medicine_vocabulary,
+            )
+        else:
+            medicine_evidence = _score_medicine_evidence(
+                normalized_text,
+                medicine_vocabulary,
+            )
+
+    combined_score = (
+        _calculate_combined_candidate_score(
+            structural_score,
+            medicine_evidence,
+        )
+    )
+
     return {
         "text": normalized_text,
-        "score": _score_ocr_text(
-            normalized_text
-        ),
+
+        # Preserve the original structural score.
+        "score": structural_score,
+
+        # New medicine-aware evidence.
+        "medicine_evidence": medicine_evidence,
+
+        # Combined score is used only for candidate selection.
+        "combined_score": combined_score,
+
         "psm": psm,
+
         "preprocessing": preprocessing,
     }
 
@@ -316,7 +687,7 @@ def extract_text_from_image(
     image: Image.Image,
 ) -> str:
     """
-    Extract prescription text using a fast-first OCR strategy.
+    Extract prescription text using a medicine-aware OCR selection strategy.
 
     Fast path:
         standard preprocessing + PSM 6
@@ -325,8 +696,20 @@ def extract_text_from_image(
         additional PSM modes and preprocessing variants are evaluated only
         when the fast result is not sufficiently strong.
 
-    This avoids running 20 Tesseract passes for every image.
+    Candidate selection considers both:
+
+        1. Structural OCR quality
+        2. Medicine-vocabulary evidence
+
+    This avoids selecting OCR that merely looks like a prescription while
+    producing no useful medicine candidates.
+
+    The returned OCR text itself remains unchanged.
     """
+
+    medicine_vocabulary = (
+        load_medicine_vocabulary()
+    )
 
     variants = _build_preprocessing_variants(image)
 
@@ -345,6 +728,8 @@ def extract_text_from_image(
         fast_text,
         standard_name,
         6,
+        medicine_vocabulary=medicine_vocabulary,
+        processed_image=standard_image,
     )
 
     if fast_candidate is not None:
@@ -353,7 +738,12 @@ def extract_text_from_image(
             f"\n--- FAST OCR | "
             f"{fast_candidate['preprocessing']} | "
             f"PSM {fast_candidate['psm']} | "
-            f"Score: {fast_candidate['score']} "
+            f"Structural Score: "
+            f"{fast_candidate['score']} | "
+            f"Medicine Evidence: "
+            f"{fast_candidate['medicine_evidence']['score']:.2f} | "
+            f"Combined Score: "
+            f"{fast_candidate['combined_score']:.2f} "
             f"---"
         )
 
@@ -361,14 +751,26 @@ def extract_text_from_image(
             fast_candidate["text"]
         )
 
-        # A strong prescription-like result does not need additional OCR.
-        if fast_candidate["score"] >= 55:
+        # A strong prescription-like result should only take the fast path
+        # when there is also reliable medicine evidence.
+        #
+        # This prevents structurally strong but medicine-empty OCR from
+        # bypassing the fallback candidates.
+        if (
+            fast_candidate["score"] >= 55
+            and _has_reliable_medicine_evidence(
+                fast_candidate["medicine_evidence"]
+            )
+        ):
 
             print(
                 f"\n=== SELECTED OCR: "
                 f"{fast_candidate['preprocessing']} | "
                 f"PSM {fast_candidate['psm']} | "
-                f"SCORE: {fast_candidate['score']} "
+                f"STRUCTURAL SCORE: "
+                f"{fast_candidate['score']} | "
+                f"COMBINED SCORE: "
+                f"{fast_candidate['combined_score']:.2f} "
                 f"| FAST PATH ==="
             )
 
@@ -415,6 +817,7 @@ def extract_text_from_image(
             text,
             preprocessing,
             psm,
+            medicine_vocabulary=medicine_vocabulary,
         )
 
         if candidate is None:
@@ -432,11 +835,21 @@ def extract_text_from_image(
         return ""
 
     for candidate in candidates:
+
+        medicine_evidence = candidate[
+            "medicine_evidence"
+        ]
+
         print(
             f"\n--- "
             f"{candidate['preprocessing']} | "
             f"PSM {candidate['psm']} | "
-            f"Score: {candidate['score']} "
+            f"Structural Score: "
+            f"{candidate['score']} | "
+            f"Medicine Evidence: "
+            f"{medicine_evidence['score']:.2f} | "
+            f"Combined Score: "
+            f"{candidate['combined_score']:.2f} "
             f"---"
         )
 
@@ -444,9 +857,14 @@ def extract_text_from_image(
             candidate["text"]
         )
 
+    # -----------------------------------------------------------------------
+    # Candidate selection
+    # -----------------------------------------------------------------------
+
     best_candidate = max(
         candidates,
         key=lambda candidate: (
+            candidate["combined_score"],
             candidate["score"],
             len(candidate["text"]),
         ),
@@ -456,7 +874,10 @@ def extract_text_from_image(
         f"\n=== SELECTED OCR: "
         f"{best_candidate['preprocessing']} | "
         f"PSM {best_candidate['psm']} | "
-        f"SCORE: {best_candidate['score']} "
+        f"STRUCTURAL SCORE: "
+        f"{best_candidate['score']} | "
+        f"COMBINED SCORE: "
+        f"{best_candidate['combined_score']:.2f} "
         f"| FALLBACK PATH ==="
     )
 
@@ -608,6 +1029,11 @@ def extract_ocr_data(
         result is weak.
 
     The return schema remains unchanged.
+
+    NOTE:
+        Medicine-aware text candidate scoring is intentionally separate
+        from word-level OCR data extraction. Spatial OCR will be integrated
+        in a later controlled phase.
     """
 
     variants = _build_preprocessing_variants(image)
