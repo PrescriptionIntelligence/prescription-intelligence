@@ -3132,4 +3132,54 @@ class TestSpatialOCRMedicineEvidence:
             for candidate in result["candidates"]
         )
 
-        
+# =========================================================
+# CORS security tests
+# =========================================================
+
+class TestCORSConfiguration:
+
+    def test_allowed_origin_receives_cors_header(self, test_app):
+        response = test_app.get(
+            "/health",
+            headers={"Origin": "http://localhost:3000"},
+        )
+
+        assert response.status_code == 200
+        assert response.headers.get("access-control-allow-origin") == "http://localhost:3000"
+
+    def test_disallowed_origin_is_not_granted_cors_access(self, test_app):
+        response = test_app.get(
+            "/health",
+            headers={"Origin": "https://malicious.example.com"},
+        )
+
+        assert response.status_code == 200
+        assert "access-control-allow-origin" not in response.headers
+
+    def test_allowed_preflight_method_and_headers(self, test_app):
+        response = test_app.options(
+            "/auth/login",
+            headers={
+                "Origin": "http://localhost:3000",
+                "Access-Control-Request-Method": "POST",
+                "Access-Control-Request-Headers": "authorization,content-type,accept",
+            },
+        )
+
+        assert response.status_code == 200
+        assert response.headers.get("access-control-allow-origin") == "http://localhost:3000"
+        assert "POST" in response.headers.get("access-control-allow-methods", "")
+        assert "Authorization" in response.headers.get("access-control-allow-headers", "")
+        assert "Content-Type" in response.headers.get("access-control-allow-headers", "")
+        assert "Accept" in response.headers.get("access-control-allow-headers", "")
+
+    def test_disallowed_preflight_method_is_rejected(self, test_app):
+        response = test_app.options(
+            "/auth/login",
+            headers={
+                "Origin": "http://localhost:3000",
+                "Access-Control-Request-Method": "TRACE",
+            },
+        )
+
+        assert response.status_code == 400
