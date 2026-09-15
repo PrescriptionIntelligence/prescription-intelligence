@@ -39,6 +39,16 @@ def _is_bare_medicine_line(
     if not _NUMERIC_RE.search(line):
         return False
 
+    # Numeric prescription schedules such as 1-0-1
+    # are instruction/frequency notation, not medicine names.
+    if re.fullmatch(
+        r"\s*\d+(?:\.\d+)?"
+        r"(?:\s*[-/:]\s*\d+(?:\.\d+)?){1,2}"
+        r"\s*",
+        line,
+    ):
+        return False
+
     candidate = _prepare_candidate(
         _clean_text(line)
     )
@@ -564,9 +574,22 @@ def _is_non_medicine_line(line: str) -> bool:
 def _is_numbered_medicine_line(line: str) -> bool:
     """
     Detect numbered prescription entries.
+
+    Numeric prescription schedules such as 1-0-1,
+    1/0/1, and 1:0:1 are not medicine entries.
     """
 
     if not line:
+        return False
+
+    # Numeric prescription schedules must not be treated
+    # as numbered medicine entries.
+    if re.fullmatch(
+        r"\s*\d+(?:\.\d+)?"
+        r"(?:\s*[-/:]\s*\d+(?:\.\d+)?){1,2}"
+        r"\s*",
+        line,
+    ):
         return False
 
     return bool(

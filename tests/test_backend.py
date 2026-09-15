@@ -762,6 +762,126 @@ class TestNoisyHandwrittenPipeline:
         )
         assert len(blocks) == 0
 
+    def test_multiple_medicines_keep_separate_instructions(self):
+        """
+        Each medicine must retain its own instruction text
+        without absorbing the next medicine entry.
+        """
+        result = process_prescription(
+            "1. Amoxicillin 500 mg\n"
+            "Take 1 capsule three times daily.\n"
+            "For 5 days.\n"
+            "\n"
+            "2. Paracetamol 500 mg\n"
+            "Take 1 tablet twice daily.\n"
+            "For 3 days."
+        )
+
+        assert len(result["medicines"]) == 2
+
+        first = result["medicines"][0]
+        second = result["medicines"][1]
+
+        assert first["strength_value"] == 500.0
+        assert first["strength_unit"] == "mg"
+        assert first["frequency_value"] == 3
+        assert first["frequency_unit"] == "daily"
+        assert first["duration_value"] == 5.0
+        assert first["duration_unit"] == "days"
+
+        assert "Paracetamol" not in (
+            first["instructions"] or ""
+        )
+
+        assert second["strength_value"] == 500.0
+        assert second["strength_unit"] == "mg"
+        assert second["frequency_value"] == 2
+        assert second["frequency_unit"] == "daily"
+        assert second["duration_value"] == 3.0
+        assert second["duration_unit"] == "days"
+
+        assert "Amoxicillin" not in (
+            second["instructions"] or ""
+        )
+
+
+    def test_numeric_schedule_is_parsed_as_frequency(self):
+        """
+        A 1-0-1 prescription schedule represents two daily doses.
+        """
+        result = process_prescription(
+            "Pantoprazole 40 mg\n"
+            "1-0-1"
+        )
+
+        assert len(result["medicines"]) == 1
+
+        medicine = result["medicines"][0]
+
+        assert medicine["strength_value"] == 40.0
+        assert medicine["strength_unit"] == "mg"
+        assert medicine["frequency_value"] == 2
+        assert medicine["frequency_unit"] == "daily"
+
+
+    def test_trailing_medicine_instructions_are_preserved(self):
+        """
+        Instructions appearing on the same line as the medicine
+        strength must remain available after extraction.
+        """
+        result = process_prescription(
+            "Pantoprazole 40 mg once daily before breakfast"
+        )
+
+        assert len(result["medicines"]) == 1
+
+        medicine = result["medicines"][0]
+
+        assert medicine["strength_value"] == 40.0
+        assert medicine["strength_unit"] == "mg"
+        assert medicine["frequency_value"] == 1
+        assert medicine["frequency_unit"] == "daily"
+
+        assert (
+            "once daily before breakfast"
+            in (medicine["instructions"] or "").lower()
+        )
+
+
+    def test_metadata_between_medicines_is_not_attached_to_instructions(self):
+        """
+        Prescription metadata between medicine entries must not
+        become part of medicine-specific instructions.
+        """
+        result = process_prescription(
+            "Amoxicillin 500 mg\n"
+            "Take 1 capsule three times daily.\n"
+            "Diagnosis: Upper respiratory infection\n"
+            "Paracetamol 500 mg\n"
+            "Take 1 tablet three times daily."
+        )
+
+        assert len(result["medicines"]) == 2
+
+        first = result["medicines"][0]
+        second = result["medicines"][1]
+
+        assert "Diagnosis:" not in (
+            first["instructions"] or ""
+        )
+
+        assert "Upper respiratory infection" not in (
+            first["instructions"] or ""
+        )
+
+        assert "Diagnosis:" not in (
+            second["instructions"] or ""
+        )
+
+        assert "Upper respiratory infection" not in (
+            second["instructions"] or ""
+        )
+
 
 # =========================================================
 # OCR text scoring (unit test, no Tesseract needed)
