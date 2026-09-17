@@ -68,6 +68,8 @@ function statusBadge(status: string): { label: string; cls: string } {
   switch (status) {
     case "analyzed":
       return { label: "Analyzed", cls: "bg-[#e8f5ed] text-[#3a6b4e]" };
+    case "review_required":
+      return { label: "Review required", cls: "bg-[#fff7df] text-[#705617]" };
     case "ocr_failed":
       return { label: "OCR Failed", cls: "bg-[#fef3f2] text-[#8b4a3a]" };
     case "uploaded":
@@ -245,12 +247,17 @@ export default function DashboardPage() {
             accent="alert"
           />
 
-          <StatCard
-            label="Needs review"
-            value={loadingStats ? "—" : String(stats?.needs_review ?? 0)}
-            description="Low-confidence items"
-            accent="warning"
-          />
+          <Link
+            href="/history"
+            className="block"
+          >
+            <StatCard
+              label="Needs review"
+              value={loadingStats ? "—" : String(stats?.needs_review ?? 0)}
+              description="Prescriptions pending pharmacist review"
+              accent="warning"
+            />
+          </Link>
         </div>
 
         {statsError && (

@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useCallback, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { authFetch, getUser, isAuthenticated } from "../../lib/auth";
 
@@ -40,6 +40,25 @@ export default function AnalyzePage() {
   const [errorMessage, setErrorMessage] = useState("");
   const [progress, setProgress] = useState(0);
   const [isDragging, setIsDragging] = useState(false);
+
+  // ---------------------------------------------------------
+  // Early auth + role guard — redirect before rendering UI
+  // ---------------------------------------------------------
+
+  useEffect(() => {
+    if (!isAuthenticated()) {
+      router.replace("/sign-in");
+      return;
+    }
+    const currentUser = getUser();
+    if (!currentUser) {
+      router.replace("/sign-in");
+      return;
+    }
+    if (currentUser.role === "customer") {
+      router.replace("/customer");
+    }
+  }, [router]);
 
   // ---------------------------------------------------------
   // File validation
@@ -188,8 +207,6 @@ export default function AnalyzePage() {
         );
       }, 800);
     } catch (error) {
-      console.error("Upload error:", error);
-
       setStage("error");
 
       setErrorMessage(

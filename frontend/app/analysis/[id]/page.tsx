@@ -900,7 +900,7 @@ export default function AnalysisDetailPage() {
                   {statusLabel}
                 </span>
 
-                {needsReview && (
+                {needsReview ? (
                   <button
                     type="button"
                     onClick={
@@ -913,7 +913,15 @@ export default function AnalysisDetailPage() {
                     </span>
                     Review prescription
                   </button>
-                )}
+                ) : isPharmacistUser && prescription ? (
+                  <button
+                    type="button"
+                    onClick={handleReviewPrescription}
+                    className="inline-flex items-center gap-2 rounded-xl border border-[#dfe6e1] bg-white px-4 py-2.5 text-xs font-medium text-[#526158] shadow-sm transition hover:bg-[#f4f7f5]"
+                  >
+                    Open in review workspace →
+                  </button>
+                ) : null}
 
                 <button
                   type="button"

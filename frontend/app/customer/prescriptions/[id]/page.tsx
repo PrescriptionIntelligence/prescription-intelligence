@@ -13,6 +13,46 @@ import {
 } from "../../../../lib/auth";
 
 // =========================================================
+// PDF download helper (used below)
+// =========================================================
+
+async function downloadReport(
+  prescriptionId: string,
+  setDownloading: (v: boolean) => void,
+  setDownloadError: (v: string) => void
+) {
+  setDownloading(true);
+  setDownloadError("");
+  try {
+    const response = await authFetch(
+      `/prescriptions/${encodeURIComponent(prescriptionId)}/report`
+    );
+    if (!response.ok) {
+      throw new Error("Unable to generate the report. Please try again.");
+    }
+    const blob = await response.blob();
+    const contentDisposition = response.headers.get("content-disposition");
+    let fileName = `${prescriptionId}-prescription-report.pdf`;
+    const match = contentDisposition?.match(/filename="?([^"]+)"?/i);
+    if (match?.[1]) fileName = match[1];
+    const url = window.URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = fileName;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    window.URL.revokeObjectURL(url);
+  } catch (err) {
+    setDownloadError(
+      err instanceof Error ? err.message : "Report download failed."
+    );
+  } finally {
+    setDownloading(false);
+  }
+}
+
+// =========================================================
 // Types
 // =========================================================
 
@@ -345,6 +385,8 @@ export default function CustomerPrescriptionDetailPage() {
 
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
+  const [downloading, setDownloading] = useState(false);
+  const [downloadError, setDownloadError] = useState("");
 
   useEffect(() => {
     let cancelled = false;
@@ -683,18 +725,32 @@ export default function CustomerPrescriptionDetailPage() {
               ← All prescriptions
             </Link>
 
-            {prescription.report_url && (
-              <a
-                href={prescription.report_url}
-                target="_blank"
-                rel="noreferrer"
-                className="inline-flex items-center rounded-xl bg-[#17211D] px-4 py-2.5 text-xs font-medium text-white transition hover:bg-[#26332D]"
-              >
-                View report
-              </a>
-            )}
+            <button
+              type="button"
+              disabled={downloading}
+              onClick={() =>
+                prescriptionId &&
+                downloadReport(prescriptionId, setDownloading, setDownloadError)
+              }
+              className="inline-flex items-center gap-2 rounded-xl bg-[#17211D] px-4 py-2.5 text-xs font-medium text-white transition hover:bg-[#26332D] disabled:cursor-not-allowed disabled:opacity-60"
+            >
+              {downloading ? (
+                <>
+                  <span className="h-3 w-3 animate-spin rounded-full border-2 border-white/30 border-t-white" />
+                  Generating…
+                </>
+              ) : (
+                <>↓ Download report</>
+              )}
+            </button>
           </div>
         </div>
+
+        {downloadError && (
+          <div className="mt-4 rounded-xl border border-[#E8D2D2] bg-[#FFF5F5] px-4 py-3 text-xs text-[#8B4040]">
+            {downloadError}
+          </div>
+        )}
 
         {/* ===================================================
             REVIEW STATUS

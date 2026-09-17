@@ -2,6 +2,7 @@
 
 import Link from "next/link";
 import { useEffect, useMemo, useState } from "react";
+import { useRouter } from "next/navigation";
 import { authFetch, isAuthenticated } from "@/lib/auth";
 
 /* =========================================================
@@ -776,6 +777,8 @@ function FindingCard({
    ========================================================= */
 
 export default function ReviewPage() {
+  const router = useRouter();
+
   const [result, setResult] =
     useState<PrescriptionResult | null>(null);
 
@@ -904,7 +907,7 @@ export default function ReviewPage() {
       "prescription_file_name"
     );
 
-    window.location.href = "/";
+    router.push("/analyze");
   }
 
   async function startReview() {
@@ -1493,6 +1496,33 @@ export default function ReviewPage() {
         </div>
         </div>
       </section>
+
+      {/* POST-COMPLETION NAVIGATION */}
+      {isFinalized && (
+        <section className="mx-auto max-w-7xl px-6 pt-5 lg:px-10">
+          <div className="flex flex-wrap items-center gap-3 rounded-[28px] border border-[#cbe0d3] bg-[#edf8f1] px-5 py-4">
+            <span className="text-xs font-semibold text-[#2d6444]">
+              {review?.review_status === "verified"
+                ? "Review complete."
+                : "Review finalised."}
+            </span>
+            <div className="flex flex-wrap gap-2 sm:ml-auto">
+              <button
+                onClick={startNewReview}
+                className="rounded-full bg-[#17211d] px-4 py-2 text-xs font-medium text-white transition hover:bg-[#26332d]"
+              >
+                Review another prescription →
+              </button>
+              <Link
+                href="/history"
+                className="rounded-full border border-[#a0c4af] bg-white px-4 py-2 text-xs font-medium text-[#2d6444] transition hover:bg-[#f3fbf5]"
+              >
+                View history
+              </Link>
+            </div>
+          </div>
+        </section>
+      )}
 
       {/* SUMMARY */}
       <section className="mx-auto max-w-7xl px-6 pt-5 lg:px-10">

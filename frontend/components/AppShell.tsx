@@ -244,14 +244,9 @@ function getNavigation(role: string): NavItem[] {
         icon: <PrescriptionIcon />,
       },
       {
-        label: "My medicines",
-        href: "/customer/prescriptions",
-        icon: <PharmacyIcon />,
-      },
-      {
-        label: "Connected pharmacies",
-        href: "/customer",
-        icon: <PharmacyLinkIcon />,
+        label: "Profile",
+        href: "/customer/profile",
+        icon: <ProfileIcon />,
       },
     ];
   }
