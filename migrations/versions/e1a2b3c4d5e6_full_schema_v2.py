@@ -12,8 +12,8 @@ import sqlalchemy as sa
 
 
 # revision identifiers, used by Alembic.
-revision: str = 'e1a2b3c4d5e6'
-down_revision: Union[str, Sequence[str], None] = '7f4ecab9d546'
+revision: str = "e1a2b3c4d5e6"
+down_revision: Union[str, Sequence[str], None] = "7f4ecab9d546"
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 
@@ -75,6 +75,7 @@ def upgrade() -> None:
         CREATE TABLE IF NOT EXISTS customers (
             id               UUID PRIMARY KEY DEFAULT gen_random_uuid(),
             organization_id  UUID NOT NULL REFERENCES organizations(id),
+            user_id          UUID UNIQUE REFERENCES users(id),
             customer_code    VARCHAR(50) NOT NULL UNIQUE,
             name             VARCHAR(200) NOT NULL,
             phone            VARCHAR(30),
@@ -90,7 +91,7 @@ def upgrade() -> None:
     op.execute("CREATE INDEX IF NOT EXISTS ix_customers_customer_code ON customers(customer_code)")
     op.execute("CREATE INDEX IF NOT EXISTS ix_customers_organization_id ON customers(organization_id)")
     op.execute("CREATE INDEX IF NOT EXISTS ix_customers_phone ON customers(phone)")
-
+    
     # ------------------------------------------------------------------
     # PRESCRIPTIONS — add missing columns
     # ------------------------------------------------------------------
@@ -294,7 +295,6 @@ def upgrade() -> None:
 
 def downgrade() -> None:
     """Remove the additions made in this migration."""
-    # Drop new indexes and tables in reverse order.
     op.execute("DROP INDEX IF EXISTS ix_prescriptions_review_status")
     op.execute("DROP INDEX IF EXISTS ix_prescriptions_customer_id")
     op.execute("DROP INDEX IF EXISTS ix_prescriptions_uploaded_by_id")

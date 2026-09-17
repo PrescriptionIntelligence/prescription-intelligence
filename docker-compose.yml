@@ -25,14 +25,14 @@ services:
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-pi_user}"]
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER} -d ${DB_NAME}"]
       interval: 10s
       timeout: 5s
       retries: 5
     ports:
       # Expose only on localhost in production.
       # Remove this mapping in hardened deployments.
-      - "127.0.0.1:5432:5432"
+      - "127.0.0.1:5433:5432"
 
 
   # ----------------------------------------------------------
