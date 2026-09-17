@@ -1,0 +1,67 @@
+# ============================================================
+# Prescription Intelligence — Frontend Dockerfile
+#
+# Multi-stage build:
+#   1. deps     — install node_modules
+#   2. builder  — next build (production)
+#   3. runtime  — Next.js production server
+# ============================================================
+
+# -----------------------------------------------------------
+# Stage 1: dependencies
+# -----------------------------------------------------------
+FROM node:20-alpine AS deps
+
+WORKDIR /app
+
+COPY frontend/package.json frontend/package-lock.json* ./
+
+# Install ALL deps (including devDependencies) needed for the build step.
+# The runtime stage does not inherit these — it copies node_modules from builder.
+RUN npm ci
+
+
+# -----------------------------------------------------------
+# Stage 2: build
+# -----------------------------------------------------------
+FROM node:20-alpine AS builder
+
+WORKDIR /app
+
+# Copy dependencies from previous stage
+COPY --from=deps /app/node_modules ./node_modules
+
+# Copy source
+COPY frontend/ .
+
+# Build-time environment variable.
+# NEXT_PUBLIC_API_URL must point to the production backend.
+# Pass it via --build-arg or set it in the docker-compose environment.
+ARG NEXT_PUBLIC_API_URL=http://localhost:8000
+ENV NEXT_PUBLIC_API_URL=$NEXT_PUBLIC_API_URL
+
+RUN npm run build
+
+
+# -----------------------------------------------------------
+# Stage 3: production runtime
+# -----------------------------------------------------------
+FROM node:20-alpine AS runtime
+
+WORKDIR /app
+
+ENV NODE_ENV=production
+
+# Standard Next.js production server (non-standalone).
+# Requires node_modules and package.json at runtime.
+COPY --from=builder /app/.next ./.next
+COPY --from=builder /app/public ./public
+COPY --from=builder /app/package.json ./package.json
+COPY --from=builder /app/node_modules ./node_modules
+
+EXPOSE 3000
+
+HEALTHCHECK --interval=30s --timeout=10s --start-period=15s --retries=3 \
+    CMD wget -qO- http://localhost:3000 || exit 1
+
+CMD ["npm", "start"]

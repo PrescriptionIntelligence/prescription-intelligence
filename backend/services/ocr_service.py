@@ -1,3 +1,4 @@
+import logging
 import re
 
 from PIL import Image, ImageEnhance, ImageFilter, ImageOps
@@ -11,6 +12,8 @@ from backend.services.medicine_normalizer import (
 from backend.services.ocr_spatial_evidence import (
     extract_spatial_medicine_evidence,
 )
+
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Basic preprocessing
@@ -734,21 +737,19 @@ def extract_text_from_image(
 
     if fast_candidate is not None:
 
-        print(
-            f"\n--- FAST OCR | "
-            f"{fast_candidate['preprocessing']} | "
-            f"PSM {fast_candidate['psm']} | "
-            f"Structural Score: "
-            f"{fast_candidate['score']} | "
-            f"Medicine Evidence: "
-            f"{fast_candidate['medicine_evidence']['score']:.2f} | "
-            f"Combined Score: "
-            f"{fast_candidate['combined_score']:.2f} "
-            f"---"
+        logger.debug(
+            "FAST OCR | %s | PSM %s | structural=%s "
+            "medicine_evidence=%.2f combined=%.2f",
+            fast_candidate["preprocessing"],
+            fast_candidate["psm"],
+            fast_candidate["score"],
+            fast_candidate["medicine_evidence"]["score"],
+            fast_candidate["combined_score"],
         )
 
-        print(
-            fast_candidate["text"]
+        logger.debug(
+            "FAST OCR text (%d chars)",
+            len(fast_candidate["text"]),
         )
 
         # A strong prescription-like result should only take the fast path
@@ -763,15 +764,13 @@ def extract_text_from_image(
             )
         ):
 
-            print(
-                f"\n=== SELECTED OCR: "
-                f"{fast_candidate['preprocessing']} | "
-                f"PSM {fast_candidate['psm']} | "
-                f"STRUCTURAL SCORE: "
-                f"{fast_candidate['score']} | "
-                f"COMBINED SCORE: "
-                f"{fast_candidate['combined_score']:.2f} "
-                f"| FAST PATH ==="
+            logger.debug(
+                "SELECTED OCR (fast path): %s | PSM %s | "
+                "structural=%s combined=%.2f",
+                fast_candidate["preprocessing"],
+                fast_candidate["psm"],
+                fast_candidate["score"],
+                fast_candidate["combined_score"],
             )
 
             return fast_candidate["text"]
@@ -840,21 +839,19 @@ def extract_text_from_image(
             "medicine_evidence"
         ]
 
-        print(
-            f"\n--- "
-            f"{candidate['preprocessing']} | "
-            f"PSM {candidate['psm']} | "
-            f"Structural Score: "
-            f"{candidate['score']} | "
-            f"Medicine Evidence: "
-            f"{medicine_evidence['score']:.2f} | "
-            f"Combined Score: "
-            f"{candidate['combined_score']:.2f} "
-            f"---"
+        logger.debug(
+            "OCR candidate | %s | PSM %s | structural=%s "
+            "medicine_evidence=%.2f combined=%.2f",
+            candidate["preprocessing"],
+            candidate["psm"],
+            candidate["score"],
+            medicine_evidence["score"],
+            candidate["combined_score"],
         )
 
-        print(
-            candidate["text"]
+        logger.debug(
+            "OCR candidate text (%d chars)",
+            len(candidate["text"]),
         )
 
     # -----------------------------------------------------------------------
@@ -870,15 +867,13 @@ def extract_text_from_image(
         ),
     )
 
-    print(
-        f"\n=== SELECTED OCR: "
-        f"{best_candidate['preprocessing']} | "
-        f"PSM {best_candidate['psm']} | "
-        f"STRUCTURAL SCORE: "
-        f"{best_candidate['score']} | "
-        f"COMBINED SCORE: "
-        f"{best_candidate['combined_score']:.2f} "
-        f"| FALLBACK PATH ==="
+    logger.debug(
+        "SELECTED OCR (fallback path): %s | PSM %s | "
+        "structural=%s combined=%.2f",
+        best_candidate["preprocessing"],
+        best_candidate["psm"],
+        best_candidate["score"],
+        best_candidate["combined_score"],
     )
 
     return best_candidate["text"]
@@ -1053,10 +1048,9 @@ def extract_ocr_data(
         fast_data
     )
 
-    print(
-        f"\n=== OCR DATA FAST PATH | "
-        f"standard | PSM 6 | "
-        f"SCORE: {fast_score:.2f} ==="
+    logger.debug(
+        "OCR data fast path | standard | PSM 6 | score=%.2f",
+        fast_score,
     )
 
     # Word-level OCR has confidence on a different scale than text scoring.
@@ -1123,12 +1117,11 @@ def extract_ocr_data(
         ),
     )
 
-    print(
-        f"\n=== SELECTED OCR DATA: "
-        f"{best_candidate['preprocessing']} | "
-        f"PSM {best_candidate['psm']} | "
-        f"SCORE: {best_candidate['score']:.2f} "
-        f"| FALLBACK PATH ==="
+    logger.debug(
+        "SELECTED OCR data (fallback path): %s | PSM %s | score=%.2f",
+        best_candidate["preprocessing"],
+        best_candidate["psm"],
+        best_candidate["score"],
     )
 
     return best_candidate["data"]

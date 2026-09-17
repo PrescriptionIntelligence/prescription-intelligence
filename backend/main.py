@@ -154,23 +154,25 @@ def health(db: Session = Depends(get_db)):
 
     Verifies the application is running and the database
     connection is active. Returns 503 if the database is
-    unreachable.
+    unreachable so load-balancers and orchestrators (k8s,
+    ECS health checks) can detect the degraded state.
     """
+    from fastapi.responses import JSONResponse
+    from sqlalchemy import text
 
     try:
-        from sqlalchemy import text
         db.execute(text("SELECT 1"))
         db_status = "connected"
     except Exception:
         db_status = "unavailable"
 
     is_healthy = db_status == "connected"
-
-    return {
+    payload = {
         "status": "healthy" if is_healthy else "degraded",
         "database": db_status,
         "version": "1.0.0",
     }
+    return JSONResponse(content=payload, status_code=200 if is_healthy else 503)
 
 
 # =========================================================
