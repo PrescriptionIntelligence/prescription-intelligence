@@ -6,8 +6,7 @@ from typing import Optional
 
 from jose import JWTError, jwt
 from passlib.context import CryptContext
-import hashlib
-import secrets
+
 
 # =========================================================
 # SECURITY CONFIGURATION
@@ -58,44 +57,6 @@ def verify_password(
         hashed_password,
     )
 
-# =========================================================
-# EMAIL VERIFICATION
-# =========================================================
-
-EMAIL_VERIFICATION_EXPIRE_MINUTES = 30
-
-
-def generate_email_verification_token() -> str:
-    """
-    Generate a cryptographically secure email verification token.
-    """
-    return secrets.token_urlsafe(32)
-
-
-def hash_email_verification_token(token: str) -> str:
-    """
-    Hash a verification token before storing it in the database.
-    """
-    return hashlib.sha256(
-        token.encode("utf-8")
-    ).hexdigest()
-
-
-def verify_email_verification_token(
-    token: str,
-    token_hash: str,
-) -> bool:
-    """
-    Compare a raw verification token against its stored hash.
-    """
-    expected_hash = hash_email_verification_token(
-        token
-    )
-
-    return secrets.compare_digest(
-        expected_hash,
-        token_hash,
-    )
 
 # =========================================================
 # EMAIL VERIFICATION
@@ -115,9 +76,7 @@ def hash_email_verification_token(token: str) -> str:
     """
     Hash the verification token before storing it in the database.
     """
-    return hashlib.sha256(
-        token.encode("utf-8")
-    ).hexdigest()
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()
 
 
 def verify_email_verification_token(
@@ -133,6 +92,7 @@ def verify_email_verification_token(
         expected_hash,
         token_hash,
     )
+
 
 # =========================================================
 # JWT

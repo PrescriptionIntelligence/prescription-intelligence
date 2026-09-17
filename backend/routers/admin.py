@@ -12,7 +12,7 @@ from backend.models import (
     ReviewAuditDB,
     UserDB,
 )
-from backend.routers.reviews import ReviewActionRequest
+from backend.schemas import ReviewActionRequest
 
 
 router = APIRouter(
@@ -24,14 +24,6 @@ router = APIRouter(
 # ============================================================
 # HELPERS
 # ============================================================
-
-VALID_REVIEW_ACTIONS = {
-    "start_review",
-    "confirm",
-    "correct",
-    "dismiss",
-    "clarify",
-}
 
 
 def get_high_priority_findings(
@@ -86,41 +78,6 @@ def get_finding_summary(
         "medium": medium,
         "low": low,
     }
-
-
-def determine_admin_review_status(
-    prescription: PrescriptionDB,
-    action: str,
-) -> str:
-    high_priority = get_high_priority_findings(
-        prescription
-    )
-
-    if action == "start_review":
-        return "under_review"
-
-    if action == "clarify":
-        return "needs_clarification"
-
-    if action == "dismiss":
-        return "rejected"
-
-    if action == "correct":
-        if high_priority:
-            return "under_review"
-
-        return "verified"
-
-    if action == "confirm":
-        if high_priority:
-            return "under_review"
-
-        return "verified"
-
-    raise HTTPException(
-        status_code=status.HTTP_400_BAD_REQUEST,
-        detail="Invalid review action.",
-    )
 
 
 def serialize_prescription(
@@ -223,6 +180,7 @@ def serialize_prescription(
 # ============================================================
 # USERS
 # ============================================================
+
 
 @router.get("/users")
 def list_admin_users(
@@ -394,6 +352,7 @@ def get_admin_user_stats(
 # PHARMACIES
 # ============================================================
 
+
 @router.get("/pharmacies")
 def list_admin_pharmacies(
     q: str | None = Query(
@@ -529,6 +488,7 @@ def get_admin_pharmacy_stats(
 # ============================================================
 # PRESCRIPTION REVIEW QUEUE
 # ============================================================
+
 
 @router.get("/reviews")
 def list_admin_reviews(
@@ -759,6 +719,7 @@ def get_admin_review_stats(
 # REVIEW DETAIL
 # ============================================================
 
+
 @router.get("/reviews/{prescription_id}")
 def get_admin_review_detail(
     prescription_id: str,
@@ -831,574 +792,28 @@ def get_admin_review_detail(
 # ADMIN REVIEW ACTION
 # ============================================================
 
+
 @router.post(
     "/reviews/{prescription_id}/action"
 )
 def perform_admin_review_action(
-    prescription_id: str,
-    payload: dict[str, Any],
-    current_user: UserDB = Depends(require_admin),
-    db: Session = Depends(get_db),
-):
-    action = str(
-        payload.get("action", "")
-    ).strip()
-
-    note = payload.get("note")
-
-    if action not in VALID_REVIEW_ACTIONS:
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                "Invalid review action. "
-                "Allowed actions: "
-                + ", ".join(
-                    sorted(VALID_REVIEW_ACTIONS)
-                )
-            ),
-        )
-
-    prescription = (
-        db.query(PrescriptionDB)
-        .filter(
-            PrescriptionDB.prescription_id
-            == prescription_id
-        )
-        .first()
-    )
-
-    if not prescription:
-        raise HTTPException(
-            status_code=404,
-            detail="Prescription not found.",
-        )
-
-    previous_status = (
-        prescription.review_status
-        or "pending"
-    )
-
-    if (
-        previous_status == "verified"
-        and action
-        in {
-            "confirm",
-            "start_review",
-        }
-    ):
-        raise HTTPException(
-            status_code=409,
-            detail="Prescription is already verified.",
-        )
-
-    new_status = determine_admin_review_status(
-        prescription,
-        action,
-    )
-
-    now = datetime.now(timezone.utc)
-
-    finding_type = payload.get(
-        "finding_type"
-    )
-
-    finding_data = payload.get(
-        "finding_data"
-    )
-
-    prescription.review_status = new_status
-
-    if action != "start_review":
-        prescription.reviewed_by_id = (
-            current_user.id
-        )
-        prescription.reviewed_at = now
-
-    if note:
-        prescription.review_notes = str(note)
-
-    audit = ReviewAuditDB(
-        prescription_id=prescription.id,
-        reviewer_id=current_user.id,
-        action=action,
-        previous_status=previous_status,
-        new_status=new_status,
-        finding_type=(
-            str(finding_type)
-            if finding_type
-            else None
-        ),
-        finding_data=(
-            finding_data
-            if isinstance(
-                finding_data,
-                dict,
-            )
-            else None
-        ),
-        note=(
-            str(note)
-            if note
-            else None
-        ),
-        created_at=now,
-    )
-
-    db.add(audit)
-
-    try:
-        db.commit()
-        db.refresh(prescription)
-
-    except Exception as exc:
-        db.rollback()
-
-        raise HTTPException(
-            status_code=500,
-            detail=(
-                "Failed to save review action: "
-                f"{str(exc)}"
-            ),
-        )
-
-    return {
-        "prescription_id": prescription.prescription_id,
-        "previous_status": previous_status,
-        "review_status": (
-            prescription.review_status
-        ),
-        "reviewed_by": {
-            "id": str(current_user.id),
-            "name": current_user.name,
-            "email": current_user.email,
-            "role": current_user.role,
-        },
-        "reviewed_at": (
-            prescription.reviewed_at.isoformat()
-            if prescription.reviewed_at
-            else None
-        ),
-        "review_notes": (
-            prescription.review_notes
-        ),
-    }
-
-# ============================================================
-# ADMIN PRESCRIPTION REVIEW MANAGEMENT
-# ============================================================
-
-@router.get("/reviews")
-def list_admin_reviews(
-    q: str | None = Query(
-        default=None,
-        max_length=100,
-        description="Search by prescription ID or file name",
-    ),
-    review_status: str | None = Query(
-        default=None,
-        description="Filter by review status",
-    ),
-    priority: str | None = Query(
-        default=None,
-        description="Filter by priority: all or high",
-    ),
-    skip: int = Query(default=0, ge=0),
-    limit: int = Query(default=20, ge=1, le=100),
-    current_user: UserDB = Depends(require_admin),
-    db: Session = Depends(get_db),
-):
-    """
-    Return the platform-wide prescription review queue.
-
-    Admins can see prescriptions across all pharmacy organizations.
-    """
-
-    from backend.models import PrescriptionDB
-
-    query = db.query(PrescriptionDB)
-
-    if q:
-        search_term = q.strip()
-
-        if search_term:
-            pattern = f"%{search_term}%"
-
-            query = query.filter(
-                PrescriptionDB.prescription_id.ilike(pattern)
-                | PrescriptionDB.file_name.ilike(pattern)
-            )
-
-    if review_status:
-        allowed_statuses = {
-            "pending",
-            "under_review",
-            "verified",
-            "needs_clarification",
-            "rejected",
-        }
-
-        if review_status not in allowed_statuses:
-            raise HTTPException(
-                status_code=400,
-                detail=(
-                    "Invalid review status. Allowed statuses: "
-                    + ", ".join(sorted(allowed_statuses))
-                ),
-            )
-
-        query = query.filter(
-            PrescriptionDB.review_status == review_status
-        )
-
-    prescriptions = (
-        query
-        .order_by(PrescriptionDB.id.desc())
-        .all()
-    )
-
-    items = []
-
-    for prescription in prescriptions:
-        safety_flags = prescription.safety_flags or []
-
-        high_priority_findings = [
-            flag
-            for flag in safety_flags
-            if isinstance(flag, dict)
-            and str(flag.get("severity", "")).lower()
-            in {"high", "critical", "error"}
-        ]
-
-        if priority == "high" and not high_priority_findings:
-            continue
-
-        organization = getattr(
-            prescription,
-            "organization",
-            None,
-        )
-
-        uploaded_by = getattr(
-            prescription,
-            "uploaded_by",
-            None,
-        )
-
-        customer = getattr(
-            prescription,
-            "customer",
-            None,
-        )
-
-        items.append(
-            {
-                "id": str(prescription.id),
-                "prescription_id": prescription.prescription_id,
-                "file_name": prescription.file_name,
-                "status": prescription.status,
-                "review_status": (
-                    prescription.review_status
-                    or "pending"
-                ),
-                "organization": (
-                    {
-                        "id": str(organization.id),
-                        "name": organization.name,
-                        "slug": organization.slug,
-                    }
-                    if organization
-                    else None
-                ),
-                "uploaded_by": (
-                    {
-                        "id": str(uploaded_by.id),
-                        "name": uploaded_by.name,
-                        "email": uploaded_by.email,
-                    }
-                    if uploaded_by
-                    else None
-                ),
-                "customer": (
-                    {
-                        "id": str(customer.id),
-                        "name": getattr(
-                            customer,
-                            "name",
-                            None,
-                        ),
-                    }
-                    if customer
-                    else None
-                ),
-                "total_findings": len(safety_flags),
-                "high_priority_findings": len(
-                    high_priority_findings
-                ),
-                "reviewed_by_id": (
-                    str(prescription.reviewed_by_id)
-                    if prescription.reviewed_by_id
-                    else None
-                ),
-                "reviewed_at": (
-                    prescription.reviewed_at.isoformat()
-                    if prescription.reviewed_at
-                    else None
-                ),
-                "review_notes": prescription.review_notes,
-                "raw_text_available": bool(
-                    prescription.raw_text
-                ),
-            }
-        )
-
-    total = len(items)
-
-    paginated_items = items[
-        skip : skip + limit
-    ]
-
-    return {
-        "items": paginated_items,
-        "total": total,
-        "skip": skip,
-        "limit": limit,
-    }
-
-
-@router.get("/reviews/stats")
-def get_admin_review_stats(
-    current_user: UserDB = Depends(require_admin),
-    db: Session = Depends(get_db),
-):
-    """
-    Return real-time prescription review statistics.
-    """
-
-    from backend.models import PrescriptionDB
-
-    prescriptions = (
-        db.query(PrescriptionDB)
-        .all()
-    )
-
-    total = len(prescriptions)
-
-    pending = 0
-    under_review = 0
-    needs_clarification = 0
-    verified = 0
-    rejected = 0
-    high_priority = 0
-
-    for prescription in prescriptions:
-        status = (
-            prescription.review_status
-            or "pending"
-        )
-
-        if status == "pending":
-            pending += 1
-        elif status == "under_review":
-            under_review += 1
-        elif status == "needs_clarification":
-            needs_clarification += 1
-        elif status == "verified":
-            verified += 1
-        elif status == "rejected":
-            rejected += 1
-
-        safety_flags = (
-            prescription.safety_flags
-            or []
-        )
-
-        has_high_priority = any(
-            isinstance(flag, dict)
-            and str(
-                flag.get("severity", "")
-            ).lower()
-            in {
-                "high",
-                "critical",
-                "error",
-            }
-            for flag in safety_flags
-        )
-
-        if has_high_priority:
-            high_priority += 1
-
-    return {
-        "total": total,
-        "pending": pending,
-        "under_review": under_review,
-        "needs_clarification": needs_clarification,
-        "verified": verified,
-        "rejected": rejected,
-        "high_priority": high_priority,
-    }
-
-
-@router.get("/reviews/{prescription_id}")
-def get_admin_review_detail(
-    prescription_id: str,
-    current_user: UserDB = Depends(require_admin),
-    db: Session = Depends(get_db),
-):
-    """
-    Return complete prescription review information for admins.
-    """
-
-    from backend.models import PrescriptionDB
-
-    prescription = (
-        db.query(PrescriptionDB)
-        .filter(
-            PrescriptionDB.prescription_id
-            == prescription_id
-        )
-        .first()
-    )
-
-    if not prescription:
-        raise HTTPException(
-            status_code=404,
-            detail="Prescription not found",
-        )
-
-    organization = getattr(
-        prescription,
-        "organization",
-        None,
-    )
-
-    uploaded_by = getattr(
-        prescription,
-        "uploaded_by",
-        None,
-    )
-
-    customer = getattr(
-        prescription,
-        "customer",
-        None,
-    )
-
-    reviewer = getattr(
-        prescription,
-        "reviewed_by",
-        None,
-    )
-
-    safety_flags = (
-        prescription.safety_flags
-        or []
-    )
-
-    high_priority_findings = [
-        flag
-        for flag in safety_flags
-        if isinstance(flag, dict)
-        and str(
-            flag.get("severity", "")
-        ).lower()
-        in {
-            "high",
-            "critical",
-            "error",
-        }
-    ]
-
-    return {
-        "id": str(prescription.id),
-        "prescription_id": prescription.prescription_id,
-        "file_name": prescription.file_name,
-        "status": prescription.status,
-        "review_status": (
-            prescription.review_status
-            or "pending"
-        ),
-        "organization": (
-            {
-                "id": str(organization.id),
-                "name": organization.name,
-                "slug": organization.slug,
-            }
-            if organization
-            else None
-        ),
-        "uploaded_by": (
-            {
-                "id": str(uploaded_by.id),
-                "name": uploaded_by.name,
-                "email": uploaded_by.email,
-            }
-            if uploaded_by
-            else None
-        ),
-        "customer": (
-            {
-                "id": str(customer.id),
-                "name": getattr(
-                    customer,
-                    "name",
-                    None,
-                ),
-            }
-            if customer
-            else None
-        ),
-        "reviewer": (
-            {
-                "id": str(reviewer.id),
-                "name": reviewer.name,
-                "email": reviewer.email,
-                "role": reviewer.role,
-            }
-            if reviewer
-            else None
-        ),
-        "reviewed_at": (
-            prescription.reviewed_at.isoformat()
-            if prescription.reviewed_at
-            else None
-        ),
-        "review_notes": prescription.review_notes,
-        "raw_text": prescription.raw_text,
-        "safety_flags": safety_flags,
-        "total_findings": len(safety_flags),
-        "high_priority_findings": len(
-            high_priority_findings
-        ),
-    }
-
-
-@router.post(
-    "/reviews/{prescription_id}/action"
-)
-def admin_review_action(
     prescription_id: str,
     request: ReviewActionRequest,
     current_user: UserDB = Depends(require_admin),
     db: Session = Depends(get_db),
 ):
     """
-    Allow an administrator to perform a review workflow action.
-
-    Every action is recorded in review_audits.
+    Perform an administrator review action using the canonical
+    prescription review validation and state-transition workflow.
     """
-
-    from datetime import datetime, timezone
-
-    from backend.models import (
-        PrescriptionDB,
-        ReviewAuditDB,
-    )
 
     from backend.routers.reviews import (
         determine_new_status,
-        get_high_priority_findings,
+        get_all_findings,
+        get_finding_key,
+        get_unresolved_high_priority_findings,
         validate_action,
+        validate_finding,
     )
 
     validate_action(request.action)
@@ -1414,9 +829,14 @@ def admin_review_action(
 
     if not prescription:
         raise HTTPException(
-            status_code=404,
-            detail="Prescription not found",
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Prescription not found.",
         )
+
+    validate_finding(
+        prescription,
+        request,
+    )
 
     previous_status = (
         prescription.review_status
@@ -1432,13 +852,21 @@ def admin_review_action(
         }
     ):
         raise HTTPException(
-            status_code=409,
+            status_code=status.HTTP_409_CONFLICT,
             detail="Prescription is already verified.",
         )
+
+    finding_index = (
+        request.finding.finding_index
+        if request.finding
+        else None
+    )
 
     new_status = determine_new_status(
         prescription,
         request.action,
+        db,
+        finding_index,
     )
 
     now = datetime.now(timezone.utc)
@@ -1447,21 +875,19 @@ def admin_review_action(
     finding_data = None
 
     if request.finding:
-        finding_type = (
-            request.finding.finding_type
-        )
+        finding_type = request.finding.finding_type
 
         finding_data = dict(
             request.finding.finding_data
         )
 
-        if (
-            request.finding.finding_index
-            is not None
-        ):
-            finding_data[
-                "finding_index"
-            ] = request.finding.finding_index
+        if finding_index is not None:
+            finding_data["finding_index"] = (
+                finding_index
+            )
+            finding_data["finding_key"] = (
+                get_finding_key(finding_index)
+            )
 
     prescription.review_status = new_status
 
@@ -1472,9 +898,7 @@ def admin_review_action(
         prescription.reviewed_at = now
 
     if request.note:
-        prescription.review_notes = (
-            request.note
-        )
+        prescription.review_notes = request.note
 
     audit = ReviewAuditDB(
         prescription_id=prescription.id,
@@ -1493,44 +917,55 @@ def admin_review_action(
     try:
         db.commit()
         db.refresh(prescription)
+
     except Exception as exc:
         db.rollback()
 
         raise HTTPException(
-            status_code=500,
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=(
-                "Failed to save admin prescription "
-                f"review: {str(exc)}"
+                "Failed to save prescription review: "
+                f"{str(exc)}"
             ),
         )
 
     high_priority = (
-        get_high_priority_findings(
-            prescription
+        get_unresolved_high_priority_findings(
+            prescription,
+            db,
         )
+    )
+
+    total_findings = len(
+        get_all_findings(prescription)
     )
 
     return {
         "prescription_id": (
             prescription.prescription_id
         ),
+        "previous_status": previous_status,
         "review_status": (
             prescription.review_status
         ),
+        "reviewed_by": {
+            "id": str(current_user.id),
+            "name": current_user.name,
+            "email": current_user.email,
+            "role": current_user.role,
+        },
         "reviewed_by_id": (
             prescription.reviewed_by_id
         ),
         "reviewed_at": (
-            prescription.reviewed_at
+            prescription.reviewed_at.isoformat()
+            if prescription.reviewed_at
+            else None
         ),
         "review_notes": (
             prescription.review_notes
         ),
-        "high_priority_findings": len(
-            high_priority
-        ),
-        "total_findings": len(
-            prescription.safety_flags or []
-        ),
+        "high_priority_findings": high_priority,
+        "total_findings": total_findings,
         "action": request.action,
     }
