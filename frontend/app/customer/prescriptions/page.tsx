@@ -14,8 +14,16 @@ import {
 
 type Medicine = {
   id?: string;
-  medicine_name?: string | null;
   name?: string | null;
+  generic_name?: string | null;
+  strength_value?: string | number | null;
+  strength_unit?: string | null;
+  dose_value?: number | null;
+  dose_unit?: string | null;
+  frequency_value?: number | null;
+  frequency_unit?: string | null;
+  // Legacy compat
+  medicine_name?: string | null;
   strength?: string | null;
   dosage?: string | null;
   dose?: string | null;
@@ -46,17 +54,26 @@ function prescriptionId(prescription: Prescription): string {
 }
 
 function medicineName(medicine: Medicine): string {
-  return medicine.medicine_name || medicine.name || "Medicine";
+  return medicine.name || medicine.generic_name || medicine.medicine_name || "Medicine";
+}
+
+function medicineStrength(medicine: Medicine): string | null {
+  if (medicine.strength_value != null) {
+    return `${medicine.strength_value}${medicine.strength_unit ? ` ${medicine.strength_unit}` : ""}`;
+  }
+  return medicine.strength || null;
 }
 
 function medicineDetails(medicine: Medicine): string {
-  return [
-    medicine.strength,
-    medicine.dosage || medicine.dose,
-    medicine.frequency,
-  ]
-    .filter(Boolean)
-    .join(" · ");
+  const strength = medicineStrength(medicine);
+  const dose = medicine.dose_value != null
+    ? `${medicine.dose_value} ${medicine.dose_unit || ""}`.trim()
+    : (medicine.dosage || medicine.dose || null);
+  const freq = medicine.frequency_value != null
+    ? `${medicine.frequency_value} ${medicine.frequency_unit || "times/day"}`
+    : (medicine.frequency || null);
+
+  return [strength, dose, freq].filter(Boolean).join(" · ");
 }
 
 function formatDate(value?: string): string {

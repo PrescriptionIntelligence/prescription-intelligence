@@ -494,6 +494,22 @@ def get_review_status(
         )
     )
 
+    unresolved = get_unresolved_findings(
+        prescription,
+        db,
+    )
+
+    current_status = (
+        prescription.review_status or "pending"
+    )
+
+    # complete_review requires under_review status
+    # AND all findings resolved.
+    can_complete = (
+        current_status == "under_review"
+        and len(unresolved) == 0
+    )
+
     reviewer = None
 
     if prescription.reviewed_by:
@@ -508,10 +524,7 @@ def get_review_status(
 
     return {
         "prescription_id": prescription.prescription_id,
-        "review_status": (
-            prescription.review_status
-            or "pending"
-        ),
+        "review_status": current_status,
         "reviewed_by_id": (
             prescription.reviewed_by_id
         ),
@@ -528,6 +541,8 @@ def get_review_status(
         "total_findings": len(
             prescription.safety_flags or []
         ),
+        "unresolved_findings": len(unresolved),
+        "can_complete_review": can_complete,
     }
 
 
@@ -690,11 +705,23 @@ def review_prescription(
         )
     )
 
+    unresolved_after = get_unresolved_findings(
+        prescription,
+        db,
+    )
+
+    new_review_status = (
+        prescription.review_status or "pending"
+    )
+
+    can_complete_after = (
+        new_review_status == "under_review"
+        and len(unresolved_after) == 0
+    )
+
     return {
         "prescription_id": prescription.prescription_id,
-        "review_status": (
-            prescription.review_status
-        ),
+        "review_status": new_review_status,
         "reviewed_by_id": (
             prescription.reviewed_by_id
         ),
@@ -716,6 +743,8 @@ def review_prescription(
         "total_findings": len(
             prescription.safety_flags or []
         ),
+        "unresolved_findings": len(unresolved_after),
+        "can_complete_review": can_complete_after,
     }
 
 

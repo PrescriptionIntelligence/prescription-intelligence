@@ -772,3 +772,109 @@ class MedicineDB(Base):
     prescription: Mapped["PrescriptionDB"] = relationship(
         back_populates="medicines",
     )
+
+
+# =========================================================
+# ORGANIZATION USAGE PLAN
+#
+# This model supports future monetization without implementing
+# billing. It defines per-organization usage limits and the
+# current plan tier.
+#
+# Tiers:
+#   free         — limited prescription analysis per month
+#   professional — larger volume, full pharmacist workflow
+#   enterprise   — organization-wide, higher limits, analytics
+#
+# Enforcement:
+#   - check_prescription_limit() raises 429 when the
+#     monthly prescription limit is reached.
+#   - Limits are enforced server-side only.
+#   - No billing integration is implemented yet.
+#   - Limits can be overridden per-organization by admin.
+# =========================================================
+
+class OrganizationPlanDB(Base):
+    __tablename__ = "organization_plans"
+
+    id: Mapped[UUID] = mapped_column(
+        primary_key=True,
+        default=uuid4,
+    )
+
+    organization_id: Mapped[UUID] = mapped_column(
+        ForeignKey(
+            "organizations.id",
+            ondelete="CASCADE",
+        ),
+        nullable=False,
+        unique=True,
+    )
+
+    # Plan tier: free | professional | enterprise
+    plan_tier: Mapped[str] = mapped_column(
+        String(50),
+        nullable=False,
+        default="free",
+    )
+
+    # Monthly prescription analysis limit.
+    # None = unlimited.
+    monthly_prescription_limit: Mapped[int | None] = mapped_column(
+        nullable=True,
+        default=25,
+    )
+
+    # When the current billing period started.
+    # Used to calculate monthly usage.
+    period_start: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc),
+    )
+
+    # Total prescriptions analyzed in the current period.
+    period_prescription_count: Mapped[int] = mapped_column(
+        nullable=False,
+        default=0,
+    )
+
+    # Whether pharmacist review workflow is enabled.
+    review_workflow_enabled: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=True,
+    )
+
+    # Whether PDF report generation is enabled.
+    # Default is False — free-tier plans do not include PDF reports.
+    # Professional and enterprise plans enable this via plan management.
+    pdf_reports_enabled: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=False,
+    )
+
+    # Optional override note (for admin use).
+    notes: Mapped[str | None] = mapped_column(
+        Text,
+        nullable=True,
+    )
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc),
+    )
+
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc),
+    )
+
+    # Relationship back to organization
+    organization: Mapped["OrganizationDB"] = relationship(
+        foreign_keys=[organization_id],
+    )

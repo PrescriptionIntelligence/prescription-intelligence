@@ -26,6 +26,10 @@ from backend.services.safety_checker import (
     check_ambiguous_medicines,
 )
 
+from backend.services.evidence_chain import (
+    build_medicine_evidence_chain,
+)
+
 
 def _assess_ocr_quality(raw_text: str) -> dict:
     """
@@ -1257,7 +1261,26 @@ def process_prescription(
     }
 
     # =========================================================
-    # 13. Unified result
+    # 13. Evidence chain per medicine
+    #
+    # Build a structured, explainable evidence trace for each
+    # medicine. This powers the pharmacist explainability view.
+    # The chain is provided as a parallel list aligned with
+    # `medicines` — it does not modify the medicine records
+    # themselves so existing consumers are unaffected.
+    # =========================================================
+
+    evidence_chains = [
+        build_medicine_evidence_chain(
+            medicine=medicine,
+            ocr_quality=ocr_quality,
+            safety_flags=safety_flags,
+        )
+        for medicine in medicines
+    ]
+
+    # =========================================================
+    # 14. Unified result
     # =========================================================
 
     return {
@@ -1267,4 +1290,5 @@ def process_prescription(
         "interpretation": interpretation,
         "prescription_plan": prescription_plan,
         "safety_analysis": safety_analysis,
+        "evidence_chains": evidence_chains,
     }

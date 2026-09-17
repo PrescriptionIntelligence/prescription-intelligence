@@ -202,6 +202,14 @@ class PrescriptionUploadResponse(BaseModel):
     prescription_plan: Optional[dict] = None
     safety_analysis: Optional[dict] = None
 
+    # evidence_chains is a parallel list aligned with
+    # medicines — one evidence chain per medicine.
+    # It is pharmacist-facing explainability context and
+    # never exposes internal filesystem paths or secrets.
+    evidence_chains: list[Any] = Field(
+        default_factory=list
+    )
+
 
 # =========================================================
 # DASHBOARD
@@ -271,6 +279,8 @@ class ReviewStatusResponse(BaseModel):
 
     high_priority_findings: int = 0
     total_findings: int = 0
+    unresolved_findings: int = 0
+    can_complete_review: bool = False
 
 
 class ReviewAuditResponse(BaseModel):

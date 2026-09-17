@@ -18,15 +18,30 @@ import {
 
 type Medicine = {
   id?: string;
-  medicine_name?: string | null;
+  // API fields from MedicineResponse schema
   name?: string | null;
+  generic_name?: string | null;
+  brand_name?: string | null;
+  strength_value?: string | number | null;
+  strength_unit?: string | null;
+  dose_value?: number | null;
+  dose_unit?: string | null;
+  frequency_value?: number | null;
+  frequency_unit?: string | null;
+  duration_value?: number | null;
+  duration_unit?: string | null;
+  instructions?: string | null;
+  extraction_confidence?: number | null;
+  normalization_confidence?: number | null;
+  needs_review?: boolean | null;
+  status?: string | null;
+  // Legacy compat fields
+  medicine_name?: string | null;
   strength?: string | null;
   dosage?: string | null;
   dose?: string | null;
   frequency?: string | null;
   duration?: string | null;
-  instructions?: string | null;
-  status?: string | null;
 };
 
 type SafetyFlag = {
@@ -78,14 +93,42 @@ function getId(value: Prescription): string {
 }
 
 function getMedicineName(medicine: Medicine): string {
-  return medicine.medicine_name || medicine.name || "Medicine";
+  return medicine.name || medicine.generic_name || medicine.medicine_name || "Medicine";
+}
+
+function getMedicineStrength(medicine: Medicine): string | null {
+  if (medicine.strength_value != null) {
+    return `${medicine.strength_value}${medicine.strength_unit ? ` ${medicine.strength_unit}` : ""}`;
+  }
+  return medicine.strength || null;
+}
+
+function getMedicineFrequency(medicine: Medicine): string | null {
+  if (medicine.frequency_value != null) {
+    return `${medicine.frequency_value} ${medicine.frequency_unit || "times/day"}`;
+  }
+  return medicine.frequency || null;
+}
+
+function getMedicineDuration(medicine: Medicine): string | null {
+  if (medicine.duration_value != null) {
+    return `${medicine.duration_value} ${medicine.duration_unit || "days"}`;
+  }
+  return medicine.duration || null;
+}
+
+function getMedicineDose(medicine: Medicine): string | null {
+  if (medicine.dose_value != null) {
+    return `${medicine.dose_value} ${medicine.dose_unit || ""}`.trim();
+  }
+  return medicine.dosage || medicine.dose || null;
 }
 
 function getMedicineDetails(medicine: Medicine): string {
   return [
-    medicine.strength,
-    medicine.dosage || medicine.dose,
-    medicine.frequency,
+    getMedicineStrength(medicine),
+    getMedicineDose(medicine),
+    getMedicineFrequency(medicine),
   ]
     .filter(Boolean)
     .join(" · ");
@@ -809,9 +852,7 @@ export default function CustomerPrescriptionDetailPage() {
 
                 return (
                   <article
-                    key={`${getMedicineName(
-                      medicine
-                    )}-${index}`}
+                    key={`${getMedicineName(medicine)}-${index}`}
                     className="rounded-2xl border border-[#DFE6E1] bg-white p-6"
                   >
                     <div className="flex items-start gap-4">
@@ -824,9 +865,15 @@ export default function CustomerPrescriptionDetailPage() {
                           {getMedicineName(medicine)}
                         </h3>
 
-                        {medicine.strength && (
+                        {getMedicineStrength(medicine) && (
                           <div className="mt-1 text-sm font-medium text-[#35664D]">
-                            {medicine.strength}
+                            {getMedicineStrength(medicine)}
+                          </div>
+                        )}
+
+                        {medicine.generic_name && medicine.generic_name !== getMedicineName(medicine) && (
+                          <div className="mt-0.5 text-[10px] text-[#8A948F]">
+                            {medicine.generic_name}
                           </div>
                         )}
                       </div>
@@ -844,14 +891,14 @@ export default function CustomerPrescriptionDetailPage() {
                       </div>
                     )}
 
-                    {medicine.duration && (
+                    {getMedicineDuration(medicine) && (
                       <div className="mt-4 flex items-center justify-between border-t border-[#EDF0EE] pt-4">
                         <span className="text-[10px] text-[#89938E]">
                           Duration
                         </span>
 
                         <span className="text-xs font-medium text-[#526158]">
-                          {medicine.duration}
+                          {getMedicineDuration(medicine)}
                         </span>
                       </div>
                     )}

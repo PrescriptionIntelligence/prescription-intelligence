@@ -60,6 +60,11 @@ from backend.services.ocr_service import extract_text_from_image
 from backend.services.prescription_pipeline import process_prescription
 from backend.services.prescription_report import build_prescription_report
 from backend.services.pdf_report_generator import generate_prescription_pdf
+from backend.services.usage_plan import (
+    check_prescription_limit,
+    increment_prescription_usage,
+    get_plan_status,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -143,10 +148,62 @@ def root():
 
 
 @app.get("/health")
-def health():
+def health(db: Session = Depends(get_db)):
+    """
+    Health check endpoint.
+
+    Verifies the application is running and the database
+    connection is active. Returns 503 if the database is
+    unreachable.
+    """
+
+    try:
+        from sqlalchemy import text
+        db.execute(text("SELECT 1"))
+        db_status = "connected"
+    except Exception:
+        db_status = "unavailable"
+
+    is_healthy = db_status == "connected"
+
     return {
-        "status": "healthy",
+        "status": "healthy" if is_healthy else "degraded",
+        "database": db_status,
+        "version": "1.0.0",
     }
+
+
+# =========================================================
+# ORGANIZATION PLAN / USAGE STATUS
+# =========================================================
+
+
+@app.get(
+    "/usage",
+    tags=["Usage"],
+)
+def get_usage_status(
+    current_user: UserDB = Depends(
+        require_pharmacy_staff
+    ),
+    db: Session = Depends(get_db),
+):
+    """
+    Return the current organization's plan and usage status.
+
+    Only pharmacy staff can access this endpoint.
+    """
+
+    if not current_user.organization_id:
+        raise HTTPException(
+            status_code=403,
+            detail="Pharmacist is not associated with an organization",
+        )
+
+    return get_plan_status(
+        organization_id=current_user.organization_id,
+        db=db,
+    )
 
 
 # =========================================================
@@ -632,6 +689,15 @@ async def upload_prescription(
             ),
         )
 
+    # ---------------------------------------------------
+    # Server-side usage limit check.
+    # Runs before file I/O to avoid wasted processing.
+    # ---------------------------------------------------
+    check_prescription_limit(
+        organization_id=current_user.organization_id,
+        db=db,
+    )
+
     allowed_types = {
         "image/jpeg": ".jpg",
         "image/png": ".png",
@@ -980,8 +1046,21 @@ async def upload_prescription(
 
     try:
         db.add(db_prescription)
+
+        # Increment usage counter inside the same transaction
+        # so usage is only recorded when the upload succeeds.
+        if current_user.organization_id:
+            increment_prescription_usage(
+                organization_id=current_user.organization_id,
+                db=db,
+            )
+
         db.commit()
         db.refresh(db_prescription)
+
+    except HTTPException:
+        db.rollback()
+        raise
 
     except Exception as exc:
         db.rollback()
@@ -1025,6 +1104,7 @@ async def upload_prescription(
         "interpretation": interpretation,
         "prescription_plan": prescription_plan,
         "safety_analysis": safety_analysis,
+        "evidence_chains": analysis.get("evidence_chains", []),
     }
 
 

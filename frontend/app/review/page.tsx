@@ -104,6 +104,8 @@ type ReviewStatus = {
   } | null;
   high_priority_findings: number;
   total_findings: number;
+  unresolved_findings: number;
+  can_complete_review: boolean;
 };
 
 type ReviewAudit = {
@@ -1446,8 +1448,8 @@ export default function ReviewPage() {
                   </button>
                 )}
 
-                {review?.review_status === "under_review" &&
-                  unresolvedFindingCount === 0 && (
+                {review?.review_status === "under_review" && (
+                  review.can_complete_review ? (
                     <button
                       disabled={actionLoading}
                       onClick={completeReview}
@@ -1457,7 +1459,14 @@ export default function ReviewPage() {
                         ? "Completing..."
                         : "Complete pharmacist review"}
                     </button>
-                  )}
+                  ) : (
+                    <div className="rounded-2xl border border-[#eadcae] bg-[#fffbf0] px-4 py-3 text-xs text-[#8b6b2b]">
+                      {(review.unresolved_findings ?? unresolvedFindingCount) > 0
+                        ? `${review.unresolved_findings ?? unresolvedFindingCount} finding${(review.unresolved_findings ?? unresolvedFindingCount) === 1 ? "" : "s"} must be resolved before completing review.`
+                        : "Review must be under review status to complete."}
+                    </div>
+                  )
+                )}
               </div>
             )}
 
@@ -1508,7 +1517,7 @@ export default function ReviewPage() {
             ],
             [
               "Unresolved",
-              unresolvedFindingCount.toString(),
+              (review?.unresolved_findings ?? unresolvedFindingCount).toString(),
               "Findings requiring pharmacist attention",
             ],
           ].map(([label, value, description]) => (
