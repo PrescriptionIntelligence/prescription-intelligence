@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from typing import Any
+
 import re
 
 
@@ -13,9 +14,7 @@ def _safe_float(value: Any) -> float | None:
     try:
         if value is None:
             return None
-
         return float(value)
-
     except (TypeError, ValueError):
         return None
 
@@ -48,7 +47,6 @@ def _normalize_strength_unit(value: Any) -> str | None:
 def _extract_candidate_strength(
     candidate: dict[str, Any],
 ) -> tuple[float, str] | None:
-
     value = candidate.get("strength_value")
     unit = candidate.get("strength_unit")
 
@@ -85,7 +83,6 @@ def _extract_candidate_strength(
 def _extract_hypothesis_strength(
     hypothesis: dict[str, Any],
 ) -> tuple[float, str] | None:
-
     value = hypothesis.get("strength_value")
     unit = hypothesis.get("strength_unit")
 
@@ -109,21 +106,17 @@ def _strength_compatibility(
     Returns:
 
         (True, reason)
-            explicit strengths match
+            Explicit strengths match.
 
         (False, reason)
-            explicit strengths conflict
+            Explicit strengths conflict.
 
         (None, reason)
-            strength cannot be compared
+            Strength cannot be compared.
     """
-    candidate_strength = _extract_candidate_strength(
-        candidate
-    )
 
-    hypothesis_strength = _extract_hypothesis_strength(
-        hypothesis
-    )
+    candidate_strength = _extract_candidate_strength(candidate)
+    hypothesis_strength = _extract_hypothesis_strength(hypothesis)
 
     if candidate_strength is None:
         return None, "candidate_strength_unavailable"
@@ -160,12 +153,36 @@ def _is_external_hypothesis(
 ) -> bool:
     """
     Detect hypotheses originating from external medicine
-    terminology/knowledge sources.
+    terminology or knowledge sources.
 
-    The normalizer may expose provenance under either
-    `source` or `provenance`. We intentionally support
-    both representations.
+    Explicit boolean provenance takes priority. This is
+    important because external providers such as RxNorm may
+    identify themselves through fields like:
+
+        {
+            "external": True,
+            "source": "RxNorm"
+        }
+
+    rather than putting the word "external" in the source name.
     """
+
+    # Explicit external marker is authoritative.
+    if hypothesis.get("external") is True:
+        return True
+
+    # Support string representations from serialized data.
+    external_value = hypothesis.get("external")
+
+    if isinstance(external_value, str):
+        if external_value.strip().lower() in {
+            "true",
+            "1",
+            "yes",
+            "external",
+        }:
+            return True
+
     source_values = []
 
     for key in (
@@ -221,6 +238,8 @@ def _determine_resolution_status(
     ):
         return "needs_review", "poor_ocr_confidence"
 
+    # External terminology/knowledge is evidence only.
+    # It must never be auto-accepted by the resolver.
     if external_hypothesis:
         return (
             "needs_review",
@@ -254,6 +273,7 @@ def resolve_medicine_candidate(
                 "strength_reason": (
                     "candidate_strength_unavailable"
                 ),
+                "external_hypothesis": False,
             },
             "reason": "no_medicine_hypotheses",
         }
@@ -356,6 +376,7 @@ def resolve_medicine_candidate(
 
     return {
         "status": status,
+
         "top_hypothesis": {
             "normalized_name": top.get(
                 "normalized_name"
@@ -378,7 +399,9 @@ def resolve_medicine_candidate(
             "score": top_score,
             "external": external_hypothesis,
         },
+
         "alternatives": alternatives,
+
         "evidence": {
             "ocr_confidence": ocr_confidence,
             "top_score": top_score,
@@ -388,5 +411,6 @@ def resolve_medicine_candidate(
             "strength_reason": strength_reason,
             "external_hypothesis": external_hypothesis,
         },
+
         "reason": reason,
     }

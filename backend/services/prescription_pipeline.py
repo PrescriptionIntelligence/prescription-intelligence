@@ -188,118 +188,176 @@ def _assess_ocr_quality(raw_text: str) -> dict:
 
 
 def _compute_confidence_summary(
-    medicines: list[dict],
-) -> dict:
-    """
-    Summarize confidence across extracted medicines.
-    """
-
+    medicines: list[dict[str, Any]],
+) -> dict[str, Any]:
     if not medicines:
         return {
-            "avg_extraction": None,
-            "avg_normalization": None,
-            "min_confidence": None,
+            "average_extraction_confidence": None,
+            "average_normalization_confidence": None,
+            "overall_confidence": None,
+            "minimum_confidence": None,
             "needs_review_count": 0,
-            "verified_count": 0,
+            "verified": False,
         }
 
-    extraction_confidences = [
-        medicine["extraction_confidence"]
+    extraction_values = [
+        _confidence_value(
+            medicine.get("extraction_confidence")
+        )
         for medicine in medicines
-        if medicine.get(
-            "extraction_confidence"
-        ) is not None
     ]
 
-    normalization_confidences = [
-        medicine["normalization_confidence"]
+    normalization_values = [
+        _confidence_value(
+            medicine.get("normalization_confidence")
+        )
         for medicine in medicines
-        if medicine.get(
-            "normalization_confidence"
-        ) is not None
     ]
 
-    all_confidences = (
-        extraction_confidences
-        + normalization_confidences
-    )
+    available_extraction = [
+        value
+        for value in extraction_values
+        if value is not None
+    ]
 
-    min_confidence = (
-        min(all_confidences)
-        if all_confidences
+    available_normalization = [
+        value
+        for value in normalization_values
+        if value is not None
+    ]
+
+    average_extraction = (
+        sum(available_extraction)
+        / len(available_extraction)
+        if available_extraction
         else None
     )
 
-    needs_review = sum(
-        1
-        for medicine in medicines
-        if (
-            medicine.get("needs_review")
-            or (
-                medicine.get(
-                    "normalization_confidence"
-                )
-                or 1.0
-            ) < 0.70
-            or (
-                medicine.get(
-                    "extraction_confidence"
-                )
-                or 1.0
-            ) < 0.70
-        )
+    average_normalization = (
+        sum(available_normalization)
+        / len(available_normalization)
+        if available_normalization
+        else None
     )
 
-    verified = sum(
-        1
-        for medicine in medicines
+    combined_values = [
+        (extraction, normalization)
+        for extraction, normalization in zip(
+            extraction_values,
+            normalization_values,
+        )
+        if extraction is not None
+        and normalization is not None
+    ]
+
+    overall_confidence = (
+        sum(
+            (extraction + normalization) / 2
+            for extraction, normalization
+            in combined_values
+        )
+        / len(combined_values)
+        if combined_values
+        else None
+    )
+
+    all_available_confidences = [
+        value
+        for value in (
+            extraction_values
+            + normalization_values
+        )
+        if value is not None
+    ]
+
+    minimum_confidence = (
+        min(all_available_confidences)
+        if all_available_confidences
+        else None
+    )
+
+    needs_review_count = 0
+
+    for medicine, extraction, normalization in zip(
+        medicines,
+        extraction_values,
+        normalization_values,
+    ):
+        missing_confidence = (
+            extraction is None
+            or normalization is None
+        )
+
+        low_confidence = (
+            extraction is not None
+            and extraction < 0.70
+        ) or (
+            normalization is not None
+            and normalization < 0.70
+        )
+
+        medicine_needs_review = bool(
+            medicine.get("needs_review")
+        )
+
         if (
-            not medicine.get("needs_review")
-            and (
-                medicine.get(
-                    "normalization_confidence"
-                )
-                or 0.0
-            ) >= 0.85
-            and (
-                medicine.get(
-                    "extraction_confidence"
-                )
-                or 0.0
-            ) >= 0.80
+            missing_confidence
+            or low_confidence
+            or medicine_needs_review
+        ):
+            needs_review_count += 1
+
+    verified = (
+        len(combined_values) == len(medicines)
+        and needs_review_count == 0
+        and all(
+            extraction >= 0.80
+            and normalization >= 0.85
+            for extraction, normalization
+            in combined_values
         )
     )
 
     return {
-        "avg_extraction": (
-            round(
-                sum(extraction_confidences)
-                / len(extraction_confidences),
-                3,
-            )
-            if extraction_confidences
+        "average_extraction_confidence": (
+            round(average_extraction, 3)
+            if average_extraction is not None
             else None
         ),
-        "avg_normalization": (
-            round(
-                sum(normalization_confidences)
-                / len(normalization_confidences),
-                3,
-            )
-            if normalization_confidences
+        "average_normalization_confidence": (
+            round(average_normalization, 3)
+            if average_normalization is not None
             else None
         ),
-        "min_confidence": (
-            round(
-                min_confidence,
-                3,
-            )
-            if min_confidence is not None
+        "overall_confidence": (
+            round(overall_confidence, 3)
+            if overall_confidence is not None
             else None
         ),
-        "needs_review_count": needs_review,
-        "verified_count": verified,
+        "minimum_confidence": (
+            round(minimum_confidence, 3)
+            if minimum_confidence is not None
+            else None
+        ),
+        "needs_review_count": needs_review_count,
+        "verified": verified,
     }
+
+def _confidence_value(value: Any) -> float | None:
+    """
+    Normalize a confidence value without treating missing values
+    as perfect confidence.
+
+    None means the confidence is unavailable.
+    Numeric values are clamped to [0.0, 1.0].
+    """
+    if value is None:
+        return None
+
+    try:
+        return max(0.0, min(1.0, float(value)))
+    except (TypeError, ValueError):
+        return None
 
 
 def _build_interpreter_candidates(
