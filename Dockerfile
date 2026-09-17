@@ -58,6 +58,7 @@ ENV PYTHONPATH=/app
 COPY backend ./backend
 COPY migrations ./migrations
 COPY alembic.ini .
+COPY data ./data
 
 # Create upload directory.
 # In production, mount a persistent volume at /app/uploads.

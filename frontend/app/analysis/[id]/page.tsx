@@ -1,9 +1,9 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect, useState } from "react";
-import { useParams } from "next/navigation";
-import { authFetch } from "@/lib/auth";
+import { FormEvent, useEffect, useRef, useState } from "react";
+import { useParams, useRouter } from "next/navigation";
+import { authFetch, getUser, isAuthenticated } from "@/lib/auth";
 
 // =========================================================
 // Types
@@ -242,6 +242,7 @@ function formatInteractionCategory(
 
 export default function AnalysisDetailPage() {
   const params = useParams();
+  const router = useRouter();
 
   const prescriptionId =
     params?.id as string;
@@ -270,6 +271,26 @@ export default function AnalysisDetailPage() {
 
   const [reportError, setReportError] =
     useState("");
+
+  // -------------------------------------------------------
+  // Customer assignment state
+  // -------------------------------------------------------
+
+  const [assignedCustomer, setAssignedCustomer] = useState<{
+    id: string;
+    name: string;
+    customer_code: string;
+  } | null>(null);
+  const [showAssign, setShowAssign] = useState(false);
+  const [assignSearch, setAssignSearch] = useState("");
+  const [assignResults, setAssignResults] = useState<
+    { id: string; name: string; customer_code: string; phone: string | null }[]
+  >([]);
+  const [assignSearching, setAssignSearching] = useState(false);
+  const [assigning, setAssigning] = useState(false);
+  const [assignError, setAssignError] = useState("");
+  const [assignSuccess, setAssignSuccess] = useState("");
+  const assignSearchRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // -------------------------------------------------------
   // Download report
@@ -347,7 +368,78 @@ export default function AnalysisDetailPage() {
       }
     };
 
-    // -------------------------------------------------------
+  // -------------------------------------------------------
+  // Customer assignment
+  // -------------------------------------------------------
+
+  const isPharmacistUser = getUser()?.role === "pharmacist";
+
+  async function handleAssignSearch(query: string) {
+    setAssignSearch(query);
+    if (assignSearchRef.current) clearTimeout(assignSearchRef.current);
+    if (!query.trim()) {
+      setAssignResults([]);
+      return;
+    }
+    assignSearchRef.current = setTimeout(async () => {
+      setAssignSearching(true);
+      try {
+        const response = await authFetch(
+          `/customers/search?q=${encodeURIComponent(query.trim())}`
+        );
+        if (response.ok) {
+          const data = await response.json();
+          setAssignResults(data);
+        }
+      } catch {
+        setAssignResults([]);
+      } finally {
+        setAssignSearching(false);
+      }
+    }, 300);
+  }
+
+  async function handleAssignCustomer(
+    event: FormEvent<HTMLFormElement>,
+    customerId: string,
+    customerName: string,
+    customerCode: string
+  ) {
+    event.preventDefault();
+    setAssigning(true);
+    setAssignError("");
+    setAssignSuccess("");
+    try {
+      const response = await authFetch(
+        `/prescriptions/${encodeURIComponent(prescriptionId)}/customer`,
+        {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ customer_id: customerId }),
+        }
+      );
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        throw new Error(
+          typeof data?.detail === "string"
+            ? data.detail
+            : "Failed to assign customer"
+        );
+      }
+      setAssignedCustomer({ id: customerId, name: customerName, customer_code: customerCode });
+      setAssignSuccess(`Assigned to ${customerName}`);
+      setShowAssign(false);
+      setAssignSearch("");
+      setAssignResults([]);
+      setTimeout(() => setAssignSuccess(""), 3000);
+    } catch (err) {
+      setAssignError(err instanceof Error ? err.message : "Failed to assign customer");
+    } finally {
+      setAssigning(false);
+    }
+  }
+
+  // -------------------------------------------------------
   // Open pharmacist review
   // -------------------------------------------------------
 
@@ -374,8 +466,21 @@ export default function AnalysisDetailPage() {
   // Load prescription
   // -------------------------------------------------------
 
+  // Auth guard: redirect unauthenticated users to sign-in
+  useEffect(() => {
+    if (!isAuthenticated()) {
+      router.replace("/sign-in");
+    }
+  }, [router]);
+
   useEffect(() => {
     if (!prescriptionId) {
+      return;
+    }
+
+    // Second-layer auth check before API call
+    if (!isAuthenticated()) {
+      router.replace("/sign-in");
       return;
     }
 
@@ -1163,6 +1268,130 @@ export default function AnalysisDetailPage() {
                 </button>
               )}
             </section>
+
+            {/* Assign customer — pharmacists only */}
+
+            {isPharmacistUser && (
+              <section className="rounded-2xl border border-[#dfe6e1] bg-white p-5 shadow-[0_5px_25px_rgba(28,46,36,0.035)]">
+
+                <div className="flex items-center justify-between">
+                  <p className="text-xs font-semibold text-[#344139]">
+                    Assigned customer
+                  </p>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setShowAssign((v) => !v);
+                      setAssignError("");
+                      setAssignSearch("");
+                      setAssignResults([]);
+                    }}
+                    className="text-[10px] font-medium text-[#35664d] hover:text-[#17211d]"
+                  >
+                    {showAssign ? "Cancel" : assignedCustomer ? "Change" : "Assign"}
+                  </button>
+                </div>
+
+                {assignSuccess && (
+                  <div className="mt-3 rounded-xl border border-[#d9e5dd] bg-[#f3f8f4] px-3 py-2.5 text-xs text-[#2d6444]">
+                    {assignSuccess}
+                  </div>
+                )}
+
+                {assignedCustomer ? (
+                  <div className="mt-3 flex items-center gap-2">
+                    <span className="h-1.5 w-1.5 rounded-full bg-[#3f7658]" />
+                    <span className="text-xs font-medium text-[#17211d]">
+                      {assignedCustomer.name}
+                    </span>
+                    <span className="font-mono text-[10px] text-[#7b8580]">
+                      {assignedCustomer.customer_code}
+                    </span>
+                    <Link
+                      href={`/customers/${encodeURIComponent(assignedCustomer.id)}`}
+                      className="ml-auto text-[10px] text-[#35664d] hover:text-[#17211d]"
+                    >
+                      View →
+                    </Link>
+                  </div>
+                ) : !showAssign ? (
+                  <p className="mt-3 text-xs text-[#9aa39e]">
+                    No customer assigned
+                  </p>
+                ) : null}
+
+                {showAssign && (
+                  <div className="mt-3">
+                    <input
+                      type="search"
+                      value={assignSearch}
+                      onChange={(e) => handleAssignSearch(e.target.value)}
+                      placeholder="Search customers…"
+                      className="w-full rounded-xl border border-[#d9e1dc] bg-[#fafcfb] px-3 py-2 text-xs outline-none focus:border-[#82988b] focus:ring-2 focus:ring-[#e5ece7]"
+                    />
+
+                    {assignSearching && (
+                      <div className="mt-2 flex items-center gap-1.5 text-[11px] text-[#7b8580]">
+                        <span className="h-3 w-3 animate-spin rounded-full border-2 border-[#cfd8d3] border-t-[#17211d]" />
+                        Searching…
+                      </div>
+                    )}
+
+                    {assignResults.length > 0 && (
+                      <ul className="mt-2 divide-y divide-[#edf0ee] overflow-hidden rounded-xl border border-[#dfe6e1] bg-white">
+                        {assignResults.map((c) => (
+                          <li key={c.id}>
+                            <form
+                              onSubmit={(e) =>
+                                handleAssignCustomer(e, c.id, c.name, c.customer_code)
+                              }
+                            >
+                              <button
+                                type="submit"
+                                disabled={assigning}
+                                className="flex w-full items-center justify-between px-3 py-2.5 text-left text-xs transition hover:bg-[#f4f7f5] disabled:opacity-60"
+                              >
+                                <span>
+                                  <span className="font-medium text-[#17211d]">
+                                    {c.name}
+                                  </span>
+                                  <span className="ml-1.5 font-mono text-[10px] text-[#7b8580]">
+                                    {c.customer_code}
+                                  </span>
+                                  {c.phone && (
+                                    <span className="ml-2 text-[10px] text-[#9aa39e]">
+                                      {c.phone}
+                                    </span>
+                                  )}
+                                </span>
+                                <span className="shrink-0 text-[#35664d]">
+                                  {assigning ? "…" : "Assign →"}
+                                </span>
+                              </button>
+                            </form>
+                          </li>
+                        ))}
+                      </ul>
+                    )}
+
+                    {assignSearch.trim() &&
+                      !assignSearching &&
+                      assignResults.length === 0 && (
+                        <p className="mt-2 text-[11px] text-[#9aa39e]">
+                          No customers found
+                        </p>
+                      )}
+
+                    {assignError && (
+                      <div className="mt-2 rounded-xl border border-[#ead8d2] bg-[#fbf5f2] px-3 py-2 text-[11px] text-[#8b5547]">
+                        {assignError}
+                      </div>
+                    )}
+                  </div>
+                )}
+              </section>
+            )}
+
           </aside>
 
           {/* =================================================
