@@ -38,6 +38,10 @@ def get_current_user(
 
     try:
         payload = decode_access_token(token)
+
+        if payload.get("token_type") != "access":
+            raise credentials_exception
+
         user_id = payload.get("sub")
 
         if not user_id:

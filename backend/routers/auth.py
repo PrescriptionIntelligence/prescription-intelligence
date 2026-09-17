@@ -228,6 +228,15 @@ def _create_verification_data() -> tuple[str, str, datetime]:
         expires_at,
     )
 
+def _as_utc_datetime(value: datetime | None) -> datetime | None:
+    """Normalize database timestamps to timezone-aware UTC."""
+    if value is None:
+        return None
+
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+
+    return value.astimezone(timezone.utc)
 
 # =========================================================
 # SHARED AUTHENTICATION
@@ -829,9 +838,13 @@ def resend_verification(
 
     now = datetime.now(timezone.utc)
 
-    if user.email_verification_sent_at:
+    sent_at = _as_utc_datetime(
+        user.email_verification_sent_at
+    )
+
+    if sent_at:
         elapsed = (
-            now - user.email_verification_sent_at
+            now - sent_at
         ).total_seconds()
 
         if elapsed < RESEND_COOLDOWN_SECONDS:

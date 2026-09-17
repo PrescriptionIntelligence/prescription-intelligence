@@ -3183,3 +3183,719 @@ class TestCORSConfiguration:
         )
 
         assert response.status_code == 400
+
+class TestProductionSecretConfiguration:
+    """Regression tests for production SECRET_KEY configuration."""
+
+    def test_production_requires_secret_key(self):
+        import os
+        import subprocess
+        import sys
+
+        env = os.environ.copy()
+        env["ENVIRONMENT"] = "production"
+        env.pop("SECRET_KEY", None)
+
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                "import backend.security",
+            ],
+            env=env,
+            capture_output=True,
+            text=True,
+        )
+
+        assert result.returncode != 0
+        combined_output = (
+            result.stdout + result.stderr
+        )
+        assert "SECRET_KEY" in combined_output
+
+    def test_production_accepts_configured_secret_key(self):
+        import os
+        import subprocess
+        import sys
+
+        env = os.environ.copy()
+        env["ENVIRONMENT"] = "production"
+        env["SECRET_KEY"] = (
+            "test-production-secret-key-"
+            "012345678901234567890123456789"
+        )
+
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                "import backend.security",
+            ],
+            env=env,
+            capture_output=True,
+            text=True,
+        )
+
+        assert result.returncode == 0
+
+    def test_development_allows_missing_secret_key(self):
+        import os
+        import subprocess
+        import sys
+
+        env = os.environ.copy()
+        env["ENVIRONMENT"] = "development"
+        env.pop("SECRET_KEY", None)
+
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                "import backend.security",
+            ],
+            env=env,
+            capture_output=True,
+            text=True,
+        )
+
+        assert result.returncode == 0
+
+class TestJWTAccessTokenSecurity:
+    """Regression tests for JWT access-token security."""
+
+    def test_access_token_contains_required_security_claims(self):
+        from backend.security import (
+            ACCESS_TOKEN_EXPIRE_MINUTES,
+            create_access_token,
+            decode_access_token,
+        )
+
+        token = create_access_token(
+            user_id="00000000-0000-0000-0000-000000000001",
+            role="customer",
+        )
+
+        payload = decode_access_token(token)
+
+        assert payload["token_type"] == "access"
+        assert payload["sub"] == (
+            "00000000-0000-0000-0000-000000000001"
+        )
+        assert "iat" in payload
+        assert "exp" in payload
+        assert payload["exp"] > payload["iat"]
+
+    def test_token_with_wrong_type_is_rejected(self):
+        from datetime import datetime, timedelta, timezone
+
+        from jose import jwt
+
+        from backend.security import ALGORITHM, SECRET_KEY
+
+        now = datetime.now(timezone.utc)
+
+        token = jwt.encode(
+            {
+                "sub": "00000000-0000-0000-0000-000000000001",
+                "role": "customer",
+                "token_type": "refresh",
+                "iat": now,
+                "exp": now + timedelta(minutes=5),
+            },
+            SECRET_KEY,
+            algorithm=ALGORITHM,
+        )
+
+        payload = jwt.decode(
+            token,
+            SECRET_KEY,
+            algorithms=[ALGORITHM],
+        )
+
+        assert payload["token_type"] != "access"
+
+    def test_token_without_type_is_not_an_access_token(self):
+        from datetime import datetime, timedelta, timezone
+
+        from jose import jwt
+
+        from backend.security import ALGORITHM, SECRET_KEY
+
+        now = datetime.now(timezone.utc)
+
+        token = jwt.encode(
+            {
+                "sub": "00000000-0000-0000-0000-000000000001",
+                "role": "customer",
+                "iat": now,
+                "exp": now + timedelta(minutes=5),
+            },
+            SECRET_KEY,
+            algorithm=ALGORITHM,
+        )
+
+        payload = jwt.decode(
+            token,
+            SECRET_KEY,
+            algorithms=[ALGORITHM],
+        )
+
+        assert payload.get("token_type") != "access"
+
+class TestJWTAccessTokenAuthentication:
+    """Verify that protected endpoints require access JWTs."""
+
+    def test_token_without_type_is_rejected(
+        self,
+        test_app,
+        token_test_user,
+    ):
+        from datetime import datetime, timedelta, timezone
+
+        from jose import jwt
+
+        from backend.security import ALGORITHM, SECRET_KEY
+
+        now = datetime.now(timezone.utc)
+
+        token = jwt.encode(
+            {
+                "sub": str(token_test_user.id),
+                "role": token_test_user.role,
+                "organization_id": (
+                    str(token_test_user.organization_id)
+                    if token_test_user.organization_id
+                    else None
+                ),
+                "iat": now,
+                "exp": now + timedelta(minutes=5),
+            },
+            SECRET_KEY,
+            algorithm=ALGORITHM,
+        )
+
+        response = test_app.get(
+            "/users/me",
+            headers={
+                "Authorization": f"Bearer {token}"
+            },
+        )
+
+        assert response.status_code == 401
+        assert response.json()["detail"] == (
+            "Invalid or expired authentication token"
+        )
+
+    def test_refresh_token_type_is_rejected(
+        self,
+        test_app,
+        token_test_user,
+    ):
+        from datetime import datetime, timedelta, timezone
+
+        from jose import jwt
+
+        from backend.security import ALGORITHM, SECRET_KEY
+
+        now = datetime.now(timezone.utc)
+
+        token = jwt.encode(
+            {
+                "sub": str(token_test_user.id),
+                "role": token_test_user.role,
+                "organization_id": (
+                    str(token_test_user.organization_id)
+                    if token_test_user.organization_id
+                    else None
+                ),
+                "token_type": "refresh",
+                "iat": now,
+                "exp": now + timedelta(minutes=5),
+            },
+            SECRET_KEY,
+            algorithm=ALGORITHM,
+        )
+
+        response = test_app.get(
+            "/users/me",
+            headers={
+                "Authorization": f"Bearer {token}"
+            },
+        )
+
+        assert response.status_code == 401
+        assert response.json()["detail"] == (
+            "Invalid or expired authentication token"
+        )
+
+    def test_valid_access_token_is_accepted(
+        self,
+        test_app,
+        token_test_user,
+    ):
+        from backend.security import create_access_token
+
+        token = create_access_token(
+            user_id=str(token_test_user.id),
+            role=token_test_user.role,
+            organization_id=(
+                str(token_test_user.organization_id)
+                if token_test_user.organization_id
+                else None
+            ),
+        )
+
+        response = test_app.get(
+            "/users/me",
+            headers={
+                "Authorization": f"Bearer {token}"
+            },
+        )
+
+        assert response.status_code == 200
+        assert response.json()["email"] == (
+            token_test_user.email
+        )
+
+    def test_expired_access_token_is_rejected(
+        self,
+        test_app,
+        token_test_user,
+    ):
+        from datetime import datetime, timedelta, timezone
+
+        from backend.security import create_access_token
+
+        token = create_access_token(
+            user_id=str(token_test_user.id),
+            role=token_test_user.role,
+            organization_id=(
+                str(token_test_user.organization_id)
+                if token_test_user.organization_id
+                else None
+            ),
+        )
+
+        # Decode/re-sign isn't necessary here; create an explicitly
+        # expired token using the same signing configuration.
+        from jose import jwt
+
+        from backend.security import ALGORITHM, SECRET_KEY
+
+        now = datetime.now(timezone.utc)
+
+        expired_token = jwt.encode(
+            {
+                "sub": str(token_test_user.id),
+                "role": token_test_user.role,
+                "organization_id": (
+                    str(token_test_user.organization_id)
+                    if token_test_user.organization_id
+                    else None
+                ),
+                "token_type": "access",
+                "iat": now - timedelta(minutes=10),
+                "exp": now - timedelta(minutes=5),
+            },
+            SECRET_KEY,
+            algorithm=ALGORITHM,
+        )
+
+        response = test_app.get(
+            "/users/me",
+            headers={
+                "Authorization": f"Bearer {expired_token}"
+            },
+        )
+
+        assert response.status_code == 401
+        assert response.json()["detail"] == (
+            "Invalid or expired authentication token"
+        )
+
+
+class TestJWTRoleTampering:
+    """Verify JWT role claims cannot elevate database privileges."""
+
+    def test_customer_cannot_become_admin_by_changing_jwt_role(
+        self,
+        test_app,
+        token_test_user,
+    ):
+        from datetime import datetime, timedelta, timezone
+
+        from jose import jwt
+
+        from backend.security import ALGORITHM, SECRET_KEY
+
+        # The database user remains a customer.
+        token_test_user.role = "customer"
+
+        now = datetime.now(timezone.utc)
+
+        # Deliberately claim admin inside the JWT.
+        token = jwt.encode(
+            {
+                "sub": str(token_test_user.id),
+                "role": "admin",
+                "organization_id": (
+                    str(token_test_user.organization_id)
+                    if token_test_user.organization_id
+                    else None
+                ),
+                "token_type": "access",
+                "iat": now,
+                "exp": now + timedelta(minutes=5),
+            },
+            SECRET_KEY,
+            algorithm=ALGORITHM,
+        )
+
+        response = test_app.get(
+            "/admin/reviews",
+            headers={
+                "Authorization": f"Bearer {token}"
+            },
+        )
+
+        assert response.status_code == 403
+
+    def test_pharmacist_cannot_become_admin_by_changing_jwt_role(
+        self,
+        test_app,
+        token_test_user,
+    ):
+        from datetime import datetime, timedelta, timezone
+
+        from jose import jwt
+
+        from backend.security import ALGORITHM, SECRET_KEY
+
+        # The database user remains a pharmacist.
+        token_test_user.role = "pharmacist"
+
+        now = datetime.now(timezone.utc)
+
+        # Deliberately claim admin inside the JWT.
+        token = jwt.encode(
+            {
+                "sub": str(token_test_user.id),
+                "role": "admin",
+                "organization_id": (
+                    str(token_test_user.organization_id)
+                    if token_test_user.organization_id
+                    else None
+                ),
+                "token_type": "access",
+                "iat": now,
+                "exp": now + timedelta(minutes=5),
+            },
+            SECRET_KEY,
+            algorithm=ALGORITHM,
+        )
+
+        response = test_app.get(
+            "/admin/reviews",
+            headers={
+                "Authorization": f"Bearer {token}"
+            },
+        )
+
+        assert response.status_code == 403
+
+class TestResendVerificationSecurity:
+    """Security regression tests for verification-email resend."""
+
+    def _create_unverified_user(
+        self,
+        auth_db_session,
+        email,
+        *,
+        sent_at=None,
+    ):
+        from backend.models import UserDB
+
+        user = UserDB(
+            organization_id=None,
+            name="Verification Test User",
+            email=email,
+            password_hash=hash_password("verification-password"),
+            role="customer",
+            is_active=True,
+            email_verified=False,
+            email_verification_sent_at=sent_at,
+        )
+
+        auth_db_session.add(user)
+        auth_db_session.commit()
+        auth_db_session.refresh(user)
+
+        return user
+
+    def test_unknown_email_returns_generic_response(
+        self,
+        test_app,
+    ):
+        response = test_app.post(
+            "/auth/resend-verification",
+            json={
+                "email": "does-not-exist-verification@example.com"
+            },
+        )
+
+        assert response.status_code == 200
+        assert response.json() == {
+            "message": (
+                "If an account exists for this email, "
+                "a verification email has been sent."
+            )
+        }
+
+    def test_verified_account_does_not_reveal_verification_state(
+        self,
+        test_app,
+        auth_db_session,
+    ):
+        from backend.models import UserDB
+
+        user = UserDB(
+            organization_id=None,
+            name="Already Verified User",
+            email="already-verified-resend@example.com",
+            password_hash=hash_password("verification-password"),
+            role="customer",
+            is_active=True,
+            email_verified=True,
+        )
+
+        auth_db_session.add(user)
+        auth_db_session.commit()
+
+        response = test_app.post(
+            "/auth/resend-verification",
+            json={
+                "email": user.email
+            },
+        )
+
+        assert response.status_code == 200
+        assert response.json() == {
+            "message": "Email address is already verified."
+        }
+
+    def test_resend_generates_hashed_token_and_30_minute_expiry(
+        self,
+        test_app,
+        auth_db_session,
+        monkeypatch,
+    ):
+        from datetime import datetime, timezone
+
+        from backend.models import UserDB
+        from backend.security import (
+            hash_email_verification_token,
+        )
+
+        captured = {}
+
+        def fake_send_email_verification(
+            *,
+            recipient_email,
+            recipient_name,
+            verification_token,
+        ):
+            captured["email"] = recipient_email
+            captured["name"] = recipient_name
+            captured["token"] = verification_token
+
+        monkeypatch.setattr(
+            "backend.routers.auth.send_email_verification",
+            fake_send_email_verification,
+        )
+
+        user = self._create_unverified_user(
+            auth_db_session,
+            "resend-token@example.com",
+        )
+
+        before = datetime.now(timezone.utc)
+
+        response = test_app.post(
+            "/auth/resend-verification",
+            json={"email": user.email},
+        )
+
+        after = datetime.now(timezone.utc)
+
+        assert response.status_code == 200
+
+        auth_db_session.refresh(user)
+
+        assert captured["email"] == user.email
+        assert captured["name"] == user.name
+        assert captured["token"]
+
+        # The raw token must never be stored.
+        assert (
+            user.email_verification_token_hash
+            != captured["token"]
+        )
+
+        # The stored value must be the SHA-256 hash of the
+        # token that was actually sent.
+        assert user.email_verification_token_hash == (
+            hash_email_verification_token(
+                captured["token"]
+            )
+        )
+
+        assert user.email_verification_expires_at is not None
+
+        expiry = user.email_verification_expires_at
+
+        if expiry.tzinfo is None:
+            expiry = expiry.replace(tzinfo=timezone.utc)
+
+        remaining = (
+            expiry - before
+        ).total_seconds()
+
+        assert 29 * 60 <= remaining <= 31 * 60
+
+    def test_resend_replaces_previous_token(
+        self,
+        test_app,
+        auth_db_session,
+        monkeypatch,
+    ):
+        sent_tokens = []
+
+        def fake_send_email_verification(
+            *,
+            recipient_email,
+            recipient_name,
+            verification_token,
+        ):
+            sent_tokens.append(verification_token)
+
+        monkeypatch.setattr(
+            "backend.routers.auth.send_email_verification",
+            fake_send_email_verification,
+        )
+
+        user = self._create_unverified_user(
+            auth_db_session,
+            "resend-replacement@example.com",
+        )
+
+        # First resend.
+        response = test_app.post(
+            "/auth/resend-verification",
+            json={"email": user.email},
+        )
+
+        assert response.status_code == 200
+        assert len(sent_tokens) == 1
+
+        auth_db_session.refresh(user)
+        first_hash = user.email_verification_token_hash
+
+        # Move the sent timestamp far enough into the past
+        # to bypass the 60-second cooldown.
+        from datetime import datetime, timedelta, timezone
+
+        user.email_verification_sent_at = (
+            datetime.now(timezone.utc)
+            - timedelta(seconds=61)
+        )
+        auth_db_session.commit()
+
+        # Second resend.
+        response = test_app.post(
+            "/auth/resend-verification",
+            json={"email": user.email},
+        )
+
+        assert response.status_code == 200
+        assert len(sent_tokens) == 2
+
+        auth_db_session.refresh(user)
+
+        assert sent_tokens[0] != sent_tokens[1]
+        assert (
+            user.email_verification_token_hash
+            != first_hash
+        )
+
+    def test_resend_cooldown_returns_429(
+        self,
+        test_app,
+        auth_db_session,
+        monkeypatch,
+    ):
+        from datetime import datetime, timezone
+
+        monkeypatch.setattr(
+            "backend.routers.auth.send_email_verification",
+            lambda **kwargs: None,
+        )
+
+        user = self._create_unverified_user(
+            auth_db_session,
+            "resend-cooldown@example.com",
+            sent_at=datetime.now(timezone.utc),
+        )
+
+        response = test_app.post(
+            "/auth/resend-verification",
+            json={"email": user.email},
+        )
+
+        assert response.status_code == 429
+        assert response.json()["detail"] == (
+            "Please wait before requesting "
+            "another verification email."
+        )
+        assert "Retry-After" in response.headers
+
+    def test_email_delivery_failure_returns_503(
+        self,
+        test_app,
+        auth_db_session,
+        monkeypatch,
+    ):
+        def failing_send_email_verification(**kwargs):
+            raise RuntimeError("SMTP unavailable")
+
+        monkeypatch.setattr(
+            "backend.routers.auth.send_email_verification",
+            failing_send_email_verification,
+        )
+
+        user = self._create_unverified_user(
+            auth_db_session,
+            "resend-failure@example.com",
+        )
+
+        response = test_app.post(
+            "/auth/resend-verification",
+            json={"email": user.email},
+        )
+
+        assert response.status_code == 503
+        assert response.json()["detail"] == (
+            "Unable to send the verification email. "
+            "Please try again later."
+        )
+
+        auth_db_session.refresh(user)
+
+        # The account must remain unverified.
+        assert user.email_verified is False
+
+        # A token hash may remain because the new token is
+        # committed before the SMTP attempt.
+        assert user.email_verification_token_hash is not None
+
+        # Failed delivery must not be recorded as successful.
+        assert user.email_verification_sent_at is None

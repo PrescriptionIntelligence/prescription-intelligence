@@ -7,16 +7,30 @@ from typing import Optional
 from jose import JWTError, jwt
 from passlib.context import CryptContext
 
+from dotenv import load_dotenv
+
+if os.getenv("ENVIRONMENT", "").strip().lower() != "production":
+    load_dotenv()
 
 # =========================================================
 # SECURITY CONFIGURATION
 # =========================================================
 
-# SECRET_KEY MUST be set in .env for production.
-# A development fallback is provided so the server starts
-# locally without configuration, but this value must be
-# replaced before any public deployment.
-_env_secret = os.getenv("SECRET_KEY")
+ENVIRONMENT = os.getenv(
+    "ENVIRONMENT",
+    "development",
+).strip().lower()
+
+_env_secret = os.getenv(
+    "SECRET_KEY",
+    "",
+).strip()
+
+if ENVIRONMENT == "production" and not _env_secret:
+    raise RuntimeError(
+        "SECRET_KEY must be configured in production."
+    )
+
 SECRET_KEY = (
     _env_secret
     if _env_secret
@@ -67,16 +81,20 @@ EMAIL_VERIFICATION_EXPIRE_MINUTES = 30
 
 def generate_email_verification_token() -> str:
     """
-    Generate a cryptographically secure one-time verification token.
+    Generate a cryptographically secure one-time
+    verification token.
     """
     return secrets.token_urlsafe(32)
 
 
 def hash_email_verification_token(token: str) -> str:
     """
-    Hash the verification token before storing it in the database.
+    Hash the verification token before storing it
+    in the database.
     """
-    return hashlib.sha256(token.encode("utf-8")).hexdigest()
+    return hashlib.sha256(
+        token.encode("utf-8")
+    ).hexdigest()
 
 
 def verify_email_verification_token(
@@ -84,9 +102,12 @@ def verify_email_verification_token(
     token_hash: str,
 ) -> bool:
     """
-    Compare a raw verification token against its stored hash.
+    Compare a raw verification token against its
+    stored hash.
     """
-    expected_hash = hash_email_verification_token(token)
+    expected_hash = hash_email_verification_token(
+        token
+    )
 
     return secrets.compare_digest(
         expected_hash,
@@ -104,11 +125,13 @@ def create_access_token(
     organization_id: Optional[str] = None,
 ) -> str:
     """
-    Create an access token containing the minimum identity
-    information required by the API.
+    Create a short-purpose access token containing the minimum
+    identity information required by the API.
     """
 
-    expire = datetime.now(timezone.utc) + timedelta(
+    now = datetime.now(timezone.utc)
+
+    expire = now + timedelta(
         minutes=ACCESS_TOKEN_EXPIRE_MINUTES
     )
 
@@ -116,6 +139,8 @@ def create_access_token(
         "sub": user_id,
         "role": role,
         "organization_id": organization_id,
+        "token_type": "access",
+        "iat": now,
         "exp": expire,
     }
 
@@ -124,7 +149,6 @@ def create_access_token(
         SECRET_KEY,
         algorithm=ALGORITHM,
     )
-
 
 def decode_access_token(token: str) -> dict:
     """
