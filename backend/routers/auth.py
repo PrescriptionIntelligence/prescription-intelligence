@@ -9,23 +9,32 @@ from backend.database import get_db
 from backend.models import (
     CustomerDB,
     OrganizationDB,
+    PasswordResetTokenDB,
     UserDB,
 )
 from backend.schemas import (
     EmailVerificationResponse,
+    ForgotPasswordRequest,
+    PasswordResetResponse,
     ResendVerificationRequest,
+    ResetPasswordRequest,
     VerifyEmailRequest,
 )
 from backend.security import (
     create_access_token,
     generate_email_verification_token,
+    generate_password_reset_token,
     hash_email_verification_token,
     hash_password,
+    hash_password_reset_token,
+    PASSWORD_RESET_EXPIRE_MINUTES,
     verify_email_verification_token,
     verify_password,
+    verify_password_reset_token,
 )
 from backend.services.email_service import (
     send_email_verification,
+    send_password_reset_email,
 )
 
 
@@ -980,4 +989,216 @@ def token(
         email=form_data.username,
         password=form_data.password,
         db=db,
+    )
+
+
+# =========================================================
+# FORGOT PASSWORD
+# =========================================================
+
+@router.post(
+    "/forgot-password",
+    response_model=PasswordResetResponse,
+)
+def forgot_password(
+    request: ForgotPasswordRequest,
+    db: Session = Depends(get_db),
+):
+    """
+    Initiate a password reset.
+
+    Always returns the same generic message regardless of
+    whether the email address is registered, to prevent
+    account enumeration.
+
+    A cryptographically random token is generated, its
+    SHA-256 hash is stored, and the raw token is sent by
+    email.  The token expires in 30 minutes.
+    """
+
+    GENERIC_RESPONSE = PasswordResetResponse(
+        message=(
+            "If an account exists for this email, "
+            "a password reset link has been sent."
+        )
+    )
+
+    normalized_email = _normalize_email(request.email)
+
+    user = (
+        db.query(UserDB)
+        .filter(UserDB.email == normalized_email)
+        .first()
+    )
+
+    # ---------------------------------------------------------
+    # Generic response — do not reveal account existence.
+    # ---------------------------------------------------------
+
+    if not user or not user.is_active:
+        return GENERIC_RESPONSE
+
+    # ---------------------------------------------------------
+    # Generate token and persist only its hash.
+    # ---------------------------------------------------------
+
+    raw_token = generate_password_reset_token()
+    token_hash = hash_password_reset_token(raw_token)
+
+    expires_at = (
+        datetime.now(timezone.utc)
+        + timedelta(minutes=PASSWORD_RESET_EXPIRE_MINUTES)
+    )
+
+    reset_token = PasswordResetTokenDB(
+        user_id=user.id,
+        token_hash=token_hash,
+        expires_at=expires_at,
+    )
+
+    db.add(reset_token)
+
+    try:
+        db.commit()
+
+    except Exception:
+        db.rollback()
+        # Still return generic response — do not leak errors.
+        return GENERIC_RESPONSE
+
+    # ---------------------------------------------------------
+    # Send the reset email.
+    # ---------------------------------------------------------
+
+    try:
+        send_password_reset_email(
+            recipient_email=user.email,
+            recipient_name=user.name,
+            reset_token=raw_token,
+        )
+
+    except Exception:
+        # Email delivery failed.  The token is already stored;
+        # the user can request again.  Return generic response
+        # so as not to reveal the failure mode externally.
+        return GENERIC_RESPONSE
+
+    return GENERIC_RESPONSE
+
+
+# =========================================================
+# RESET PASSWORD
+# =========================================================
+
+@router.post(
+    "/reset-password",
+    response_model=PasswordResetResponse,
+)
+def reset_password(
+    request: ResetPasswordRequest,
+    db: Session = Depends(get_db),
+):
+    """
+    Complete a password reset.
+
+    Validates the token, updates the password with bcrypt,
+    marks the token as used, and commits atomically.
+
+    Never returns the token or the new password in the
+    response.
+    """
+
+    token_hash = hash_password_reset_token(request.token)
+
+    reset_record = (
+        db.query(PasswordResetTokenDB)
+        .filter(PasswordResetTokenDB.token_hash == token_hash)
+        .first()
+    )
+
+    now = datetime.now(timezone.utc)
+
+    # ---------------------------------------------------------
+    # Token not found
+    # ---------------------------------------------------------
+
+    if not reset_record:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid or expired password reset link.",
+        )
+
+    # ---------------------------------------------------------
+    # Already used
+    # ---------------------------------------------------------
+
+    if reset_record.used_at is not None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="This password reset link has already been used.",
+        )
+
+    # ---------------------------------------------------------
+    # Expiration
+    # ---------------------------------------------------------
+
+    expires_at = reset_record.expires_at
+    if expires_at.tzinfo is None:
+        expires_at = expires_at.replace(tzinfo=timezone.utc)
+
+    if expires_at < now:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="This password reset link has expired.",
+        )
+
+    # ---------------------------------------------------------
+    # Constant-time token verification
+    # ---------------------------------------------------------
+
+    if not verify_password_reset_token(
+        request.token,
+        reset_record.token_hash,
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid or expired password reset link.",
+        )
+
+    # ---------------------------------------------------------
+    # Load the owning user
+    # ---------------------------------------------------------
+
+    user = (
+        db.query(UserDB)
+        .filter(UserDB.id == reset_record.user_id)
+        .first()
+    )
+
+    if not user or not user.is_active:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid or expired password reset link.",
+        )
+
+    # ---------------------------------------------------------
+    # Update password and invalidate token atomically
+    # ---------------------------------------------------------
+
+    user.password_hash = hash_password(request.new_password)
+    reset_record.used_at = now
+
+    try:
+        db.commit()
+
+    except Exception:
+        db.rollback()
+
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Password reset failed. Please try again.",
+        )
+
+    return PasswordResetResponse(
+        message="Your password has been reset successfully.",
     )

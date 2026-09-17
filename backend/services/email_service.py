@@ -243,3 +243,198 @@ Prescription Intelligence
             config["password"],
         )
         server.send_message(message)
+
+
+def send_password_reset_email(
+    recipient_email: str,
+    recipient_name: str,
+    reset_token: str,
+) -> None:
+    """
+    Send a password-reset email.
+
+    The raw token is sent only by email; the database stores only
+    its SHA-256 hash.  The full reset URL is never logged.
+    """
+
+    config = _get_smtp_config()
+
+    frontend_url = os.getenv(
+        "FRONTEND_URL",
+        "http://localhost:3000",
+    ).rstrip("/")
+
+    reset_url = (
+        f"{frontend_url}/reset-password"
+        f"?token={reset_token}"
+    )
+
+    display_name = recipient_name.strip() or "there"
+
+    message = EmailMessage()
+
+    message["Subject"] = (
+        "Reset your password — Prescription Intelligence"
+    )
+    message["From"] = config["from_email"]
+    message["To"] = recipient_email
+
+    text_body = f"""Hello {display_name},
+
+We received a request to reset the password for your
+Prescription Intelligence account.
+
+Reset your password:
+{reset_url}
+
+This link will expire in 30 minutes.
+
+If you did not request a password reset, you can safely
+ignore this email. Your password will not be changed.
+
+Regards,
+Prescription Intelligence
+"""
+
+    html_body = f"""\
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>Reset your password</title>
+</head>
+<body style="
+    margin: 0;
+    padding: 0;
+    background: #F4F7F5;
+    font-family: Arial, Helvetica, sans-serif;
+">
+    <div style="
+        max-width: 620px;
+        margin: 40px auto;
+        background: #FFFFFF;
+        border: 1px solid #DFE6E1;
+        border-radius: 12px;
+        overflow: hidden;
+    ">
+        <div style="
+            padding: 28px 32px;
+            border-bottom: 1px solid #DFE6E1;
+        ">
+            <div style="
+                font-size: 13px;
+                font-weight: 700;
+                letter-spacing: 0.08em;
+                color: #35664D;
+                text-transform: uppercase;
+            ">
+                Prescription Intelligence
+            </div>
+        </div>
+
+        <div style="padding: 32px;">
+            <h1 style="
+                margin: 0 0 16px;
+                color: #17211D;
+                font-size: 26px;
+                line-height: 1.25;
+            ">
+                Reset your password
+            </h1>
+
+            <p style="
+                color: #526158;
+                font-size: 15px;
+                line-height: 1.6;
+            ">
+                Hello {display_name},
+            </p>
+
+            <p style="
+                color: #526158;
+                font-size: 15px;
+                line-height: 1.6;
+            ">
+                We received a request to reset the password for
+                your Prescription Intelligence account.
+            </p>
+
+            <div style="margin: 28px 0;">
+                <a
+                    href="{reset_url}"
+                    style="
+                        display: inline-block;
+                        padding: 13px 22px;
+                        background: #35664D;
+                        color: #FFFFFF;
+                        text-decoration: none;
+                        border-radius: 7px;
+                        font-size: 14px;
+                        font-weight: 700;
+                    "
+                >
+                    Reset password
+                </a>
+            </div>
+
+            <p style="
+                color: #7C8881;
+                font-size: 13px;
+                line-height: 1.6;
+            ">
+                This link expires in 30 minutes.
+            </p>
+
+            <p style="
+                color: #7C8881;
+                font-size: 13px;
+                line-height: 1.6;
+            ">
+                If the button does not work, copy this link
+                into your browser:
+            </p>
+
+            <p style="
+                color: #526158;
+                font-size: 12px;
+                line-height: 1.6;
+                word-break: break-all;
+            ">
+                {reset_url}
+            </p>
+
+            <p style="
+                margin-top: 28px;
+                color: #7C8881;
+                font-size: 13px;
+                line-height: 1.6;
+            ">
+                If you did not request a password reset, you
+                can safely ignore this email. Your password
+                will not be changed.
+            </p>
+        </div>
+    </div>
+</body>
+</html>
+"""
+
+    message.set_content(text_body)
+    message.add_alternative(
+        html_body,
+        subtype="html",
+    )
+
+    with smtplib.SMTP(
+        config["host"],
+        config["port"],
+        timeout=20,
+    ) as server:
+        server.ehlo()
+        server.starttls()
+        server.ehlo()
+        server.login(
+            config["username"],
+            config["password"],
+        )
+        server.send_message(message)

@@ -508,3 +508,27 @@ class ResendVerificationRequest(BaseModel):
 class EmailVerificationResponse(BaseModel):
     message: str
     email_verified: bool
+
+
+# =========================================================
+# PASSWORD RESET
+# =========================================================
+
+class ForgotPasswordRequest(BaseModel):
+    email: EmailStr
+
+
+class ResetPasswordRequest(BaseModel):
+    token: str = Field(
+        min_length=20,
+        max_length=200,
+    )
+
+    new_password: str = Field(
+        min_length=8,
+        max_length=128,
+    )
+
+
+class PasswordResetResponse(BaseModel):
+    message: str

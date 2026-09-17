@@ -162,3 +162,39 @@ def decode_access_token(token: str) -> dict:
         SECRET_KEY,
         algorithms=[ALGORITHM],
     )
+
+
+# =========================================================
+# PASSWORD RESET
+# =========================================================
+
+PASSWORD_RESET_EXPIRE_MINUTES = 30
+
+
+def generate_password_reset_token() -> str:
+    """
+    Generate a cryptographically secure one-time reset token.
+    """
+    return secrets.token_urlsafe(32)
+
+
+def hash_password_reset_token(token: str) -> str:
+    """
+    Return the SHA-256 hex digest of the raw reset token.
+    Only the hash is stored in the database.
+    """
+    return hashlib.sha256(
+        token.encode("utf-8")
+    ).hexdigest()
+
+
+def verify_password_reset_token(
+    token: str,
+    token_hash: str,
+) -> bool:
+    """
+    Constant-time comparison of a raw reset token against
+    its stored SHA-256 hash.
+    """
+    expected = hash_password_reset_token(token)
+    return secrets.compare_digest(expected, token_hash)

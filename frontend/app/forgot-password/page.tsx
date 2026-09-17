@@ -2,17 +2,37 @@
 
 import Link from "next/link";
 import { FormEvent, useState } from "react";
+import { forgotPassword } from "../../lib/auth";
 
 export default function ForgotPasswordPage() {
   const [email, setEmail] = useState("");
   const [sent, setSent] = useState(false);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
 
-  function handleSubmit(event: FormEvent<HTMLFormElement>) {
+  async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    setError("");
 
-    if (!email) return;
+    const trimmed = email.trim();
 
-    setSent(true);
+    if (!trimmed) {
+      setError("Please enter your email address.");
+      return;
+    }
+
+    setLoading(true);
+
+    try {
+      await forgotPassword(trimmed);
+      setSent(true);
+    } catch {
+      // Show the success state even on network/server errors
+      // to avoid leaking whether the account exists.
+      setSent(true);
+    } finally {
+      setLoading(false);
+    }
   }
 
   return (
@@ -50,9 +70,17 @@ export default function ForgotPasswordPage() {
               </div>
 
               <p className="mt-2 text-xs leading-5 text-[#718078]">
-                If an account exists for {email}, password reset instructions
-                will be sent there.
+                If an account exists for {email.trim()}, password reset
+                instructions will be sent there. The link expires in 30
+                minutes.
               </p>
+
+              <Link
+                href="/sign-in"
+                className="mt-4 inline-block text-xs text-[#35664d] hover:text-[#17211d]"
+              >
+                ← Return to sign in
+              </Link>
             </div>
           ) : (
             <form onSubmit={handleSubmit} className="mt-8">
@@ -65,14 +93,23 @@ export default function ForgotPasswordPage() {
                 value={email}
                 onChange={(e) => setEmail(e.target.value)}
                 placeholder="you@example.com"
-                className="w-full rounded-xl border border-[#d9e1dc] bg-[#fafcfb] px-4 py-3 text-sm outline-none focus:border-[#82988b]"
+                autoComplete="email"
+                disabled={loading}
+                className="w-full rounded-xl border border-[#d9e1dc] bg-[#fafcfb] px-4 py-3 text-sm outline-none transition placeholder:text-[#a1aaa5] focus:border-[#82988b] focus:ring-2 focus:ring-[#e5ece7] disabled:opacity-60"
               />
+
+              {error && (
+                <div className="mt-3 rounded-xl border border-[#ead8d2] bg-[#fbf5f2] px-4 py-3 text-xs leading-5 text-[#8b5547]">
+                  {error}
+                </div>
+              )}
 
               <button
                 type="submit"
-                className="mt-5 w-full rounded-xl bg-[#17211d] py-3.5 text-sm font-medium text-white hover:bg-[#26332d]"
+                disabled={loading}
+                className="mt-5 w-full rounded-xl bg-[#17211d] py-3.5 text-sm font-medium text-white transition hover:bg-[#26332d] disabled:cursor-not-allowed disabled:opacity-60"
               >
-                Send reset instructions →
+                {loading ? "Sending…" : "Send reset instructions →"}
               </button>
             </form>
           )}

@@ -878,3 +878,60 @@ class OrganizationPlanDB(Base):
     organization: Mapped["OrganizationDB"] = relationship(
         foreign_keys=[organization_id],
     )
+
+
+# =========================================================
+# PASSWORD RESET TOKENS
+# =========================================================
+
+class PasswordResetTokenDB(Base):
+    """
+    One-time password-reset tokens.
+
+    Only the SHA-256 hash is stored; the raw token is
+    sent to the user by email and never persisted.
+    """
+
+    __tablename__ = "password_reset_tokens"
+
+    id: Mapped[UUID] = mapped_column(
+        primary_key=True,
+        default=uuid4,
+    )
+
+    user_id: Mapped[UUID] = mapped_column(
+        ForeignKey(
+            "users.id",
+            ondelete="CASCADE",
+        ),
+        nullable=False,
+        index=True,
+    )
+
+    token_hash: Mapped[str] = mapped_column(
+        String(64),
+        nullable=False,
+        unique=True,
+        index=True,
+    )
+
+    expires_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+    )
+
+    used_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+        default=None,
+    )
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc),
+    )
+
+    user: Mapped["UserDB"] = relationship(
+        foreign_keys=[user_id],
+    )
