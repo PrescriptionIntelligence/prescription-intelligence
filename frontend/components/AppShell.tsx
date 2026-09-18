@@ -302,6 +302,11 @@ function getNavigation(role: string): NavItem[] {
       href: "/customers",
       icon: <CustomersIcon />,
     },
+    {
+      label: "Settings",
+      href: "/settings/organization",
+      icon: <ProfileIcon />,
+    },
   ];
 }
 
@@ -324,7 +329,9 @@ function getAllowedWorkspace(pathname: string) {
     pathname === "/analysis" ||
     pathname.startsWith("/analysis/") ||
     pathname === "/review" ||
-    pathname.startsWith("/review/")
+    pathname.startsWith("/review/") ||
+    pathname === "/settings" ||
+    pathname.startsWith("/settings/")
   ) {
     return "pharmacist";
   }
@@ -440,6 +447,7 @@ export default function AppShell({
     pathname.startsWith("/signup/") ||
     pathname === "/forgot-password" ||
     pathname === "/verify-email" ||
+    pathname === "/accept-invite" ||
     pathname === "/admin/login";
 
     if (!user || publicRoute) {

@@ -1202,3 +1202,103 @@ def reset_password(
     return PasswordResetResponse(
         message="Your password has been reset successfully.",
     )
+
+
+# =========================================================
+# ACCEPT INVITATION
+# =========================================================
+
+
+class AcceptInviteRequest(BaseModel):
+    email: EmailStr
+    token: str = Field(min_length=1, max_length=256)
+    password: str = Field(min_length=8, max_length=128)
+
+
+@router.post("/accept-invite")
+def accept_invite(
+    request: AcceptInviteRequest,
+    db: Session = Depends(get_db),
+):
+    """
+    Accept a pharmacist invitation.
+
+    Validates the invitation token, sets the invitee's password,
+    marks email verified, and activates the account.
+
+    This endpoint is the only path to activating an invited account.
+    Regular login is blocked until this step completes.
+    """
+
+    normalized_email = _normalize_email(request.email)
+
+    user = (
+        db.query(UserDB)
+        .filter(UserDB.email == normalized_email)
+        .first()
+    )
+
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid invitation",
+        )
+
+    # Must be an unverified, inactive pharmacist with a pending token.
+    if user.email_verified or user.is_active:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="This invitation has already been used",
+        )
+
+    if not user.email_verification_token_hash:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid invitation",
+        )
+
+    expires_at = _as_utc_datetime(user.email_verification_expires_at)
+
+    if not expires_at or expires_at < datetime.now(timezone.utc):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                "Invitation has expired. "
+                "Ask the inviting pharmacist to send a new invitation."
+            ),
+        )
+
+    if not verify_email_verification_token(
+        request.token,
+        user.email_verification_token_hash,
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid invitation token",
+        )
+
+    # Set password, verify, and activate atomically.
+    user.password_hash = hash_password(request.password)
+    user.email_verified = True
+    user.is_active = True
+    user.email_verification_token_hash = None
+    user.email_verification_expires_at = None
+    user.email_verification_sent_at = None
+
+    try:
+        db.commit()
+        db.refresh(user)
+    except Exception:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to accept invitation. Please try again.",
+        )
+
+    return {
+        "message": (
+            "Invitation accepted. Your account is now active. "
+            "Please sign in."
+        ),
+        "email": user.email,
+    }

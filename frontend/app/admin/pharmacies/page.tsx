@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { FormEvent, useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import {
   Activity,
@@ -73,6 +73,15 @@ function statusStyle(isActive: boolean) {
   return "border-[#DFE6E1] bg-[#F4F7F5] text-[#7C8881]";
 }
 
+const PLAN_TIERS = ["free", "professional", "enterprise"] as const;
+type PlanTier = typeof PLAN_TIERS[number];
+
+const PLAN_LABELS: Record<PlanTier, string> = {
+  free: "Free",
+  professional: "Professional",
+  enterprise: "Enterprise",
+};
+
 export default function AdminPharmaciesPage() {
   const router = useRouter();
 
@@ -102,6 +111,13 @@ export default function AdminPharmaciesPage() {
   const [error, setError] = useState("");
 
   const pageSize = 20;
+
+  // Plan change modal state
+  const [planModalOrg, setPlanModalOrg] = useState<PharmacyRow | null>(null);
+  const [selectedTier, setSelectedTier] = useState<PlanTier>("free");
+  const [planSaving, setPlanSaving] = useState(false);
+  const [planError, setPlanError] = useState("");
+  const [planSuccess, setPlanSuccess] = useState("");
 
   useEffect(() => {
     async function loadAdmin() {
@@ -260,6 +276,42 @@ export default function AdminPharmaciesPage() {
 
   const hasPreviousPage = page > 0;
   const hasNextPage = page + 1 < totalPages;
+
+  async function handlePlanChange(e: FormEvent) {
+    e.preventDefault();
+    if (!planModalOrg) return;
+    setPlanSaving(true);
+    setPlanError("");
+    setPlanSuccess("");
+
+    try {
+      const res = await authFetch(
+        `/admin/organizations/${planModalOrg.id}/plan`,
+        {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ plan_tier: selectedTier }),
+        }
+      );
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        throw new Error(
+          typeof data?.detail === "string" ? data.detail : "Failed to update plan"
+        );
+      }
+      setPlanSuccess(
+        `${planModalOrg.name} is now on the ${PLAN_LABELS[selectedTier]} plan.`
+      );
+      setTimeout(() => {
+        setPlanModalOrg(null);
+        setPlanSuccess("");
+      }, 1800);
+    } catch (err) {
+      setPlanError(err instanceof Error ? err.message : "Failed to update plan");
+    } finally {
+      setPlanSaving(false);
+    }
+  }
 
   if (loading) {
     return (
@@ -577,6 +629,10 @@ export default function AdminPharmaciesPage() {
                       <th className="px-5 py-3 text-xs font-semibold uppercase tracking-wide text-[#7C8881]">
                         Created
                       </th>
+
+                      <th className="px-5 py-3 text-xs font-semibold uppercase tracking-wide text-[#7C8881]">
+                        Plan
+                      </th>
                     </tr>
                   </thead>
 
@@ -668,6 +724,21 @@ export default function AdminPharmaciesPage() {
                         <td className="px-5 py-4 text-sm text-[#526158]">
                           {formatDate(pharmacy.created_at)}
                         </td>
+
+                        <td className="px-5 py-4">
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setPlanModalOrg(pharmacy);
+                              setSelectedTier("free");
+                              setPlanError("");
+                              setPlanSuccess("");
+                            }}
+                            className="rounded-lg border border-[#DFE6E1] bg-white px-3 py-1.5 text-xs font-medium text-[#526158] transition hover:border-[#CBE0D3] hover:text-[#35664D]"
+                          >
+                            Change plan
+                          </button>
+                        </td>
                       </tr>
                     ))}
                   </tbody>
@@ -739,6 +810,68 @@ export default function AdminPharmaciesPage() {
           )}
         </section>
       </div>
+
+      {/* PLAN CHANGE MODAL */}
+      {planModalOrg && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 px-4">
+          <div className="w-full max-w-sm rounded-2xl border border-[#DFE6E1] bg-white p-6 shadow-[0_24px_60px_rgba(23,33,29,0.18)]">
+            <h2 className="text-base font-semibold text-[#17211D]">
+              Change plan
+            </h2>
+            <p className="mt-1 text-sm text-[#7C8881]">
+              {planModalOrg.name}
+            </p>
+
+            {planSuccess ? (
+              <div className="mt-4 rounded-xl border border-[#c8e4d0] bg-[#edf8f1] px-4 py-3 text-sm text-[#35664d]">
+                {planSuccess}
+              </div>
+            ) : (
+              <form onSubmit={handlePlanChange} className="mt-5 space-y-4">
+                <div>
+                  <label className="mb-1.5 block text-xs font-medium text-[#46534c]">
+                    Plan tier
+                  </label>
+                  <select
+                    value={selectedTier}
+                    onChange={(e) => setSelectedTier(e.target.value as PlanTier)}
+                    className="h-11 w-full rounded-xl border border-[#DFE6E1] bg-[#FAFCFB] px-4 text-sm outline-none transition focus:border-[#35664D]"
+                  >
+                    {PLAN_TIERS.map((tier) => (
+                      <option key={tier} value={tier}>
+                        {PLAN_LABELS[tier]}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                {planError && (
+                  <div className="rounded-xl border border-[#ead8d2] bg-[#fbf5f2] px-3 py-2 text-xs text-[#8b5547]">
+                    {planError}
+                  </div>
+                )}
+
+                <div className="flex gap-3 pt-1">
+                  <button
+                    type="submit"
+                    disabled={planSaving}
+                    className="flex-1 rounded-xl bg-[#17211D] py-2.5 text-sm font-medium text-white transition hover:bg-[#26332D] disabled:opacity-60"
+                  >
+                    {planSaving ? "Saving…" : "Save"}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setPlanModalOrg(null)}
+                    className="flex-1 rounded-xl border border-[#DFE6E1] py-2.5 text-sm font-medium text-[#526158] transition hover:border-[#CBE0D3]"
+                  >
+                    Cancel
+                  </button>
+                </div>
+              </form>
+            )}
+          </div>
+        </div>
+      )}
     </main>
   );
 }

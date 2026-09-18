@@ -34,6 +34,17 @@ type DashboardStats = {
   recent_prescriptions: RecentPrescription[];
 };
 
+type UsageStatus = {
+  plan_tier: string;
+  display_name: string;
+  monthly_limit: number | null;
+  prescriptions_used_this_period: number;
+  prescriptions_remaining: number | null;
+  review_workflow_enabled: boolean;
+  pdf_reports_enabled: boolean;
+  at_limit: boolean;
+};
+
 // =========================================================
 // Helpers
 // =========================================================
@@ -89,6 +100,7 @@ export default function DashboardPage() {
   const [stats, setStats] = useState<DashboardStats | null>(null);
   const [statsError, setStatsError] = useState("");
   const [loadingStats, setLoadingStats] = useState(true);
+  const [usage, setUsage] = useState<UsageStatus | null>(null);
 
   useEffect(() => {
     if (!isAuthenticated()) {
@@ -132,6 +144,18 @@ export default function DashboardPage() {
       .finally(() => {
         setLoadingStats(false);
       });
+
+    // Fetch plan/usage status — only pharmacists have access.
+    if (stored.role === "pharmacist") {
+      authFetch("/usage")
+        .then((res) => (res.ok ? res.json() : null))
+        .then((data: UsageStatus | null) => {
+          if (data) setUsage(data);
+        })
+        .catch(() => {
+          // Non-critical — silently ignore
+        });
+    }
   }, [router]);
 
   if (!user) {
@@ -264,6 +288,66 @@ export default function DashboardPage() {
           <div className="mt-6 rounded-xl border border-[#ead8d2] bg-[#fbf5f2] px-4 py-3 text-xs text-[#8b5547]">
             {statsError} — statistics may be unavailable while the backend is
             starting.
+          </div>
+        )}
+
+        {/* ================================================
+            USAGE / PLAN WIDGET
+            ================================================ */}
+
+        {usage && (
+          <div className={`mt-6 rounded-2xl border px-5 py-4 ${
+            usage.at_limit
+              ? "border-[#f0cccc] bg-[#fff5f5]"
+              : "border-[#dfe6e1] bg-white"
+          }`}>
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div className="flex items-center gap-3">
+                <span className={`rounded-full px-2.5 py-1 text-[11px] font-semibold ${
+                  usage.plan_tier === "free"
+                    ? "bg-[#f0f4f2] text-[#526158]"
+                    : usage.plan_tier === "professional"
+                    ? "bg-[#edf8f1] text-[#35664d]"
+                    : "bg-[#f0f0f8] text-[#3a3a8a]"
+                }`}>
+                  {usage.display_name}
+                </span>
+                <span className="text-xs text-[#77847d]">
+                  {usage.monthly_limit === null
+                    ? `${usage.prescriptions_used_this_period} prescriptions this month — unlimited plan`
+                    : usage.at_limit
+                    ? `${usage.prescriptions_used_this_period} / ${usage.monthly_limit} — limit reached`
+                    : `${usage.prescriptions_used_this_period} / ${usage.monthly_limit} prescriptions this month`}
+                </span>
+              </div>
+              {usage.monthly_limit !== null && !usage.at_limit && (
+                <div className="flex items-center gap-2 text-xs text-[#77847d]">
+                  <div className="h-1.5 w-32 overflow-hidden rounded-full bg-[#e8ede9]">
+                    <div
+                      className="h-full rounded-full bg-[#35664d] transition-all"
+                      style={{
+                        width: `${Math.min(100, Math.round((usage.prescriptions_used_this_period / usage.monthly_limit) * 100))}%`,
+                      }}
+                    />
+                  </div>
+                  <span>{usage.prescriptions_remaining} remaining</span>
+                </div>
+              )}
+              {usage.at_limit && (
+                <Link
+                  href="/dashboard"
+                  className="text-xs font-medium text-[#8b4a3a] hover:underline"
+                  title="Contact support to upgrade your plan"
+                >
+                  Limit reached — contact support →
+                </Link>
+              )}
+            </div>
+            {!usage.pdf_reports_enabled && (
+              <div className="mt-2 text-[11px] text-[#9aa39e]">
+                PDF reports are not available on the {usage.display_name} plan.
+              </div>
+            )}
           </div>
         )}
 
@@ -424,20 +508,86 @@ export default function DashboardPage() {
 
         {!loadingStats && stats && stats.recent_prescriptions.length === 0 && (
           <section className="mt-14">
-            <div className="rounded-2xl border border-dashed border-[#dfe6e1] bg-white px-8 py-12 text-center">
-              <div className="text-3xl text-[#cdd6d0]">Rx</div>
-              <h3 className="mt-4 text-sm font-medium text-[#6b7870]">
-                No prescriptions yet
-              </h3>
-              <p className="mt-2 text-xs text-[#9aa4a0]">
-                Upload your first prescription to begin.
-              </p>
-              <Link
-                href="/analyze"
-                className="mt-6 inline-flex rounded-xl bg-[#17211d] px-5 py-2.5 text-xs font-medium text-white hover:bg-[#26332d] transition"
-              >
-                Analyze prescription
-              </Link>
+            {/* First-login onboarding panel */}
+            <div className="rounded-2xl border border-[#dfe6e1] bg-white overflow-hidden">
+              <div className="border-b border-[#edf0ee] bg-[#f7faf8] px-8 py-5">
+                <div className="text-[10px] font-semibold uppercase tracking-[0.18em] text-[#77847d]">
+                  Get started
+                </div>
+                <h3 className="mt-1.5 text-lg font-semibold tracking-[-0.03em]">
+                  Welcome to your pharmacy workspace
+                </h3>
+              </div>
+
+              <div className="px-8 py-8">
+                <div className="grid gap-5 md:grid-cols-3">
+
+                  <Link
+                    href="/analyze"
+                    className="group flex flex-col rounded-2xl border border-[#dfe6e1] p-5 transition hover:border-[#b8cfc0] hover:bg-[#f7faf8]"
+                  >
+                    <div className="grid h-10 w-10 place-items-center rounded-xl bg-[#edf8f1] text-[#35664d]">
+                      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7">
+                        <path d="M12 5v14M5 12h14" />
+                      </svg>
+                    </div>
+                    <div className="mt-4">
+                      <div className="text-sm font-semibold">Analyze your first prescription</div>
+                      <p className="mt-1.5 text-xs leading-5 text-[#7b8580]">
+                        Upload a prescription image to run the full AI analysis pipeline.
+                      </p>
+                    </div>
+                    <div className="mt-4 text-xs font-medium text-[#35664d] group-hover:underline">
+                      Upload image →
+                    </div>
+                  </Link>
+
+                  <Link
+                    href="/customers"
+                    className="group flex flex-col rounded-2xl border border-[#dfe6e1] p-5 transition hover:border-[#b8cfc0] hover:bg-[#f7faf8]"
+                  >
+                    <div className="grid h-10 w-10 place-items-center rounded-xl bg-[#f4f7f5] text-[#526158]">
+                      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7">
+                        <circle cx="12" cy="8" r="3.5" />
+                        <path d="M5 21c.8-4.1 3.1-6.2 7-6.2s6.2 2.1 7 6.2" />
+                      </svg>
+                    </div>
+                    <div className="mt-4">
+                      <div className="text-sm font-semibold">Add your first customer</div>
+                      <p className="mt-1.5 text-xs leading-5 text-[#7b8580]">
+                        Register a customer profile to link prescriptions to patients.
+                      </p>
+                    </div>
+                    <div className="mt-4 text-xs font-medium text-[#35664d] group-hover:underline">
+                      Add customer →
+                    </div>
+                  </Link>
+
+                  <Link
+                    href="/settings/organization"
+                    className="group flex flex-col rounded-2xl border border-[#dfe6e1] p-5 transition hover:border-[#b8cfc0] hover:bg-[#f7faf8]"
+                  >
+                    <div className="grid h-10 w-10 place-items-center rounded-xl bg-[#f4f7f5] text-[#526158]">
+                      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7">
+                        <path d="M4 21h16" />
+                        <path d="M6 21V5a2 2 0 0 1 2-2h8a2 2 0 0 1 2 2v16" />
+                        <path d="M9 7h6" />
+                        <path d="M9 11h2" />
+                      </svg>
+                    </div>
+                    <div className="mt-4">
+                      <div className="text-sm font-semibold">Complete your pharmacy profile</div>
+                      <p className="mt-1.5 text-xs leading-5 text-[#7b8580]">
+                        Add your pharmacy&apos;s contact details, address, and information.
+                      </p>
+                    </div>
+                    <div className="mt-4 text-xs font-medium text-[#35664d] group-hover:underline">
+                      Update profile →
+                    </div>
+                  </Link>
+
+                </div>
+              </div>
             </div>
           </section>
         )}

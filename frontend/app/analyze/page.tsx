@@ -165,6 +165,14 @@ export default function AnalyzePage() {
           .json()
           .catch(() => ({}));
 
+        // Quota-exceeded receives a specific user-visible message.
+        if (response.status === 429) {
+          throw new Error(
+            "Your monthly prescription limit has been reached. " +
+            "Please contact support to upgrade your plan, or wait until next month."
+          );
+        }
+
         throw new Error(
           typeof errorData?.detail === "string"
             ? errorData.detail

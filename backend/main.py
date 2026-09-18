@@ -546,6 +546,15 @@ def create_prescription(
             ),
         )
 
+    # ---------------------------------------------------------
+    # Server-side quota check — must run before any DB writes.
+    # Mirrors the same enforcement used in /prescriptions/upload.
+    # ---------------------------------------------------------
+    check_prescription_limit(
+        organization_id=current_user.organization_id,
+        db=db,
+    )
+
     existing = (
         db.query(PrescriptionDB)
         .filter(
@@ -633,8 +642,20 @@ def create_prescription(
 
     try:
         db.add(db_prescription)
+
+        # Increment usage inside the same transaction so the
+        # counter only moves when the prescription is saved.
+        increment_prescription_usage(
+            organization_id=current_user.organization_id,
+            db=db,
+        )
+
         db.commit()
         db.refresh(db_prescription)
+
+    except HTTPException:
+        db.rollback()
+        raise
 
     except Exception as exc:
         db.rollback()
@@ -1281,6 +1302,41 @@ def download_prescription_report(
         current_user=current_user,
         db=db,
     )
+
+    # ---------------------------------------------------------
+    # Plan entitlement check.
+    #
+    # PDF reports are a paid feature.  Pharmacists on plans where
+    # pdf_reports_enabled=False receive HTTP 403.
+    #
+    # Customers and admins are exempt:
+    #   - Customers view their own prescriptions; the pharmacy's
+    #     plan governs the analysis, not the patient's access.
+    #   - Admins have platform-wide access.
+    # ---------------------------------------------------------
+    if current_user.role == "pharmacist":
+        if not current_user.organization_id:
+            raise HTTPException(
+                status_code=403,
+                detail=(
+                    "Pharmacist is not associated "
+                    "with an organization"
+                ),
+            )
+
+        plan = get_plan_status(
+            organization_id=current_user.organization_id,
+            db=db,
+        )
+
+        if not plan.get("pdf_reports_enabled", False):
+            raise HTTPException(
+                status_code=403,
+                detail=(
+                    "PDF reports are not available on your current plan. "
+                    "Please contact support to upgrade."
+                ),
+            )
 
     raw_text = (
         prescription.raw_text

@@ -63,7 +63,7 @@ class OrganizationResponse(BaseModel):
     id: UUID
     name: str
     slug: str
-    status: str
+    is_active: bool
     created_at: datetime
 
     model_config = {

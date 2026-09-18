@@ -2,17 +2,20 @@ from datetime import datetime, timezone
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
+from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from backend.auth import require_admin
 from backend.database import get_db
 from backend.models import (
     OrganizationDB,
+    OrganizationPlanDB,
     PrescriptionDB,
     ReviewAuditDB,
     UserDB,
 )
 from backend.schemas import ReviewActionRequest
+from backend.services.usage_plan import PLAN_TIERS
 
 
 router = APIRouter(
@@ -482,6 +485,196 @@ def get_admin_pharmacy_stats(
         "total_pharmacies": total_pharmacies,
         "active_pharmacies": active_pharmacies,
         "inactive_pharmacies": inactive_pharmacies,
+    }
+
+
+# ============================================================
+# ORGANIZATION PLAN MANAGEMENT
+# ============================================================
+
+
+class UpdatePlanRequest(BaseModel):
+    """Request body for updating an organization's plan tier."""
+    plan_tier: str
+
+
+@router.patch("/organizations/{organization_id}/plan")
+def update_organization_plan(
+    organization_id: str,
+    request: UpdatePlanRequest,
+    current_user: UserDB = Depends(require_admin),
+    db: Session = Depends(get_db),
+):
+    """
+    Update the plan tier for a pharmacy organization.
+
+    Admin-only. Validates against the known tier list and updates
+    (or creates) the OrganizationPlanDB row, applying the canonical
+    limits and feature flags defined in PLAN_TIERS.
+    """
+
+    # Validate tier name against the known set.
+    if request.plan_tier not in PLAN_TIERS:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=(
+                f"Unknown plan tier '{request.plan_tier}'. "
+                f"Valid tiers: {', '.join(PLAN_TIERS)}"
+            ),
+        )
+
+    # Verify the organization exists.
+    try:
+        from uuid import UUID
+        org_uuid = UUID(organization_id)
+    except ValueError:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Organization not found",
+        )
+
+    organization = (
+        db.query(OrganizationDB)
+        .filter(OrganizationDB.id == org_uuid)
+        .first()
+    )
+
+    if not organization:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Organization not found",
+        )
+
+    tier_info = PLAN_TIERS[request.plan_tier]
+
+    # Get or create the plan row.
+    plan = (
+        db.query(OrganizationPlanDB)
+        .filter(OrganizationPlanDB.organization_id == org_uuid)
+        .first()
+    )
+
+    if plan is None:
+        plan = OrganizationPlanDB(
+            organization_id=org_uuid,
+            plan_tier=request.plan_tier,
+            monthly_prescription_limit=(
+                tier_info["monthly_prescription_limit"]
+            ),
+            period_start=datetime.now(timezone.utc),
+            period_prescription_count=0,
+            review_workflow_enabled=(
+                tier_info["review_workflow_enabled"]
+            ),
+            pdf_reports_enabled=(
+                tier_info["pdf_reports_enabled"]
+            ),
+        )
+        db.add(plan)
+    else:
+        plan.plan_tier = request.plan_tier
+        plan.monthly_prescription_limit = (
+            tier_info["monthly_prescription_limit"]
+        )
+        plan.review_workflow_enabled = (
+            tier_info["review_workflow_enabled"]
+        )
+        plan.pdf_reports_enabled = (
+            tier_info["pdf_reports_enabled"]
+        )
+        plan.updated_at = datetime.now(timezone.utc)
+
+    db.commit()
+    db.refresh(plan)
+
+    return {
+        "organization_id": organization_id,
+        "organization_name": organization.name,
+        "plan_tier": plan.plan_tier,
+        "display_name": tier_info["display_name"],
+        "monthly_prescription_limit": (
+            plan.monthly_prescription_limit
+        ),
+        "review_workflow_enabled": (
+            plan.review_workflow_enabled
+        ),
+        "pdf_reports_enabled": (
+            plan.pdf_reports_enabled
+        ),
+        "updated_at": plan.updated_at,
+    }
+
+
+@router.get("/organizations/{organization_id}/plan")
+def get_organization_plan(
+    organization_id: str,
+    current_user: UserDB = Depends(require_admin),
+    db: Session = Depends(get_db),
+):
+    """
+    Return the current plan for a pharmacy organization.
+    Admin-only.
+    """
+    try:
+        from uuid import UUID
+        org_uuid = UUID(organization_id)
+    except ValueError:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Organization not found",
+        )
+
+    organization = (
+        db.query(OrganizationDB)
+        .filter(OrganizationDB.id == org_uuid)
+        .first()
+    )
+
+    if not organization:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Organization not found",
+        )
+
+    plan = (
+        db.query(OrganizationPlanDB)
+        .filter(OrganizationPlanDB.organization_id == org_uuid)
+        .first()
+    )
+
+    if plan is None:
+        # Return default free-tier information if no plan row yet.
+        tier_info = PLAN_TIERS["free"]
+        return {
+            "organization_id": organization_id,
+            "organization_name": organization.name,
+            "plan_tier": "free",
+            "display_name": tier_info["display_name"],
+            "monthly_prescription_limit": (
+                tier_info["monthly_prescription_limit"]
+            ),
+            "review_workflow_enabled": (
+                tier_info["review_workflow_enabled"]
+            ),
+            "pdf_reports_enabled": (
+                tier_info["pdf_reports_enabled"]
+            ),
+            "period_prescription_count": 0,
+            "updated_at": None,
+        }
+
+    tier_info = PLAN_TIERS.get(plan.plan_tier, PLAN_TIERS["free"])
+
+    return {
+        "organization_id": organization_id,
+        "organization_name": organization.name,
+        "plan_tier": plan.plan_tier,
+        "display_name": tier_info["display_name"],
+        "monthly_prescription_limit": plan.monthly_prescription_limit,
+        "review_workflow_enabled": plan.review_workflow_enabled,
+        "pdf_reports_enabled": plan.pdf_reports_enabled,
+        "period_prescription_count": plan.period_prescription_count,
+        "updated_at": plan.updated_at,
     }
 
 

@@ -387,6 +387,7 @@ class OrganizationResponse(BaseModel):
     id: UUID
     name: str
     slug: str
+    is_active: bool = True
 
     model_config = {
         "from_attributes": True
