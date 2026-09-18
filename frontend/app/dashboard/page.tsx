@@ -11,6 +11,7 @@ import {
   authFetch,
   getRoleHome,
 } from "../../lib/auth";
+import AppShell from "../../components/AppShell";
 
 // =========================================================
 // Types
@@ -167,69 +168,7 @@ export default function DashboardPage() {
   }
 
   return (
-    <main className="min-h-screen bg-[#f3f6f3] text-[#17211d]">
-
-      {/* ================================================
-          HEADER
-          ================================================ */}
-
-      <header className="border-b border-[#dfe6e1] bg-white">
-        <div className="mx-auto flex max-w-7xl items-center justify-between px-6 py-5">
-
-          <Link href="/" className="flex items-center gap-3">
-            <span className="grid h-9 w-9 place-items-center rounded-xl bg-[#17211d] text-xs font-semibold text-white">
-              Rx
-            </span>
-            <div>
-              <div className="text-sm font-semibold">
-                Prescription Intelligence
-              </div>
-              <div className="text-[9px] uppercase tracking-[0.18em] text-[#82908a]">
-                Medication intelligence
-              </div>
-            </div>
-          </Link>
-
-          <nav className="hidden items-center gap-6 md:flex">
-            <Link
-              href="/dashboard"
-              className="text-xs font-medium text-[#17211d]"
-            >
-              Dashboard
-            </Link>
-            <Link
-              href="/history"
-              className="text-xs text-[#637069] hover:text-[#17211d]"
-            >
-              History
-            </Link>
-            <Link
-              href="/analyze"
-              className="text-xs text-[#637069] hover:text-[#17211d]"
-            >
-              Analyze
-            </Link>
-          </nav>
-
-          <div className="flex items-center gap-4">
-            <div className="hidden text-right sm:block">
-              <div className="text-xs font-medium">{user.name}</div>
-              <div className="text-[10px] text-[#8a948f]">{user.email}</div>
-            </div>
-            <button
-              onClick={logout}
-              className="rounded-xl border border-[#dce3de] bg-white px-4 py-2 text-xs font-medium text-[#53625a] hover:border-[#bbc7bf] transition"
-            >
-              Log out
-            </button>
-          </div>
-        </div>
-      </header>
-
-      {/* ================================================
-          HERO
-          ================================================ */}
-
+    <AppShell>
       <section className="mx-auto max-w-7xl px-6 py-12">
         <div>
           <div className="text-xs font-semibold uppercase tracking-[0.18em] text-[#77847d]">
@@ -272,7 +211,7 @@ export default function DashboardPage() {
           />
 
           <Link
-            href="/history"
+            href="/history?review_status=pending"
             className="block"
           >
             <StatCard
@@ -335,11 +274,11 @@ export default function DashboardPage() {
               )}
               {usage.at_limit && (
                 <Link
-                  href="/dashboard"
+                  href="/settings/organization"
                   className="text-xs font-medium text-[#8b4a3a] hover:underline"
-                  title="Contact support to upgrade your plan"
+                  title="View your plan details or contact support to upgrade"
                 >
-                  Limit reached — contact support →
+                  Limit reached — view plan →
                 </Link>
               )}
             </div>
@@ -592,7 +531,7 @@ export default function DashboardPage() {
           </section>
         )}
       </section>
-    </main>
+    </AppShell>
   );
 }
 

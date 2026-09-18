@@ -298,6 +298,11 @@ function getNavigation(role: string): NavItem[] {
       icon: <HistoryIcon />,
     },
     {
+      label: "Review queue",
+      href: "/history?review_status=pending",
+      icon: <PrescriptionIcon />,
+    },
+    {
       label: "Customers",
       href: "/customers",
       icon: <CustomersIcon />,

@@ -236,6 +236,58 @@ def update_my_organization(
 
 
 # =========================================================
+# ORGANIZATION MEMBERS
+# =========================================================
+
+
+@router.get("/organization/members")
+def get_organization_members(
+    current_user: UserDB = Depends(require_pharmacy_staff),
+    db: Session = Depends(get_db),
+):
+    """
+    Return the staff members of the current user's organization.
+
+    Only pharmacists are returned — customers are excluded.
+    No passwords, tokens, or sensitive authentication fields are returned.
+    Organization ID is always taken from the authenticated user context —
+    never from client input.
+    """
+    if not current_user.organization_id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Pharmacist is not associated with an organization",
+        )
+
+    members = (
+        db.query(UserDB)
+        .filter(
+            UserDB.organization_id == current_user.organization_id,
+            UserDB.role == "pharmacist",
+        )
+        .order_by(UserDB.created_at.asc())
+        .all()
+    )
+
+    return [
+        {
+            "id": str(member.id),
+            "name": member.name,
+            "email": member.email,
+            "role": member.role,
+            "is_active": member.is_active,
+            "email_verified": member.email_verified,
+            "created_at": (
+                member.created_at.isoformat()
+                if member.created_at
+                else None
+            ),
+        }
+        for member in members
+    ]
+
+
+# =========================================================
 # PHARMACIST INVITATION
 # =========================================================
 

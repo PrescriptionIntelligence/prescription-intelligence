@@ -181,6 +181,61 @@ def serialize_prescription(
 
 
 # ============================================================
+# PLATFORM STATISTICS — admin overview
+# ============================================================
+
+
+@router.get("/stats")
+def get_admin_stats(
+    current_user: UserDB = Depends(require_admin),
+    db: Session = Depends(get_db),
+):
+    """
+    Return platform-wide aggregate statistics for the admin overview.
+
+    Admin-only. All counts are live database queries.
+    """
+    total_users = (
+        db.query(UserDB).count()
+    )
+
+    total_orgs = (
+        db.query(OrganizationDB).count()
+    )
+
+    total_prescriptions = (
+        db.query(PrescriptionDB).count()
+    )
+
+    # Pending reviews: review_status is NULL or "pending"
+    from sqlalchemy import or_
+    pending_reviews = (
+        db.query(PrescriptionDB)
+        .filter(
+            or_(
+                PrescriptionDB.review_status == "pending",
+                PrescriptionDB.review_status.is_(None),
+            )
+        )
+        .count()
+    )
+
+    under_review = (
+        db.query(PrescriptionDB)
+        .filter(PrescriptionDB.review_status == "under_review")
+        .count()
+    )
+
+    return {
+        "total_users": total_users,
+        "total_organizations": total_orgs,
+        "total_prescriptions": total_prescriptions,
+        "pending_reviews": pending_reviews,
+        "under_review": under_review,
+    }
+
+
+# ============================================================
 # USERS
 # ============================================================
 

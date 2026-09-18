@@ -127,6 +127,7 @@ class PrescriptionResponse(BaseModel):
     prescription_id: str
     raw_text: Optional[str] = None
     status: str
+    review_status: str = "pending"
     safety_flags: list[Any] = Field(
         default_factory=list
     )
@@ -165,6 +166,7 @@ class PrescriptionResponse(BaseModel):
                 "prescription_id": data.prescription_id,
                 "raw_text": data.raw_text,
                 "status": data.status,
+                "review_status": data.review_status or "pending",
                 "safety_flags": data.safety_flags or [],
                 "file_name": data.file_name,
                 "file_type": data.file_type,

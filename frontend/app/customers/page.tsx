@@ -68,6 +68,9 @@ export default function CustomersPage() {
   const [customers, setCustomers] = useState<Customer[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
+  const [skip, setSkip] = useState(0);
+  const [hasMore, setHasMore] = useState(false);
+  const [loadingMore, setLoadingMore] = useState(false);
 
   const [searchQuery, setSearchQuery] = useState("");
   const [searching, setSearching] = useState(false);
@@ -93,21 +96,35 @@ export default function CustomersPage() {
   // Load customer list
   // ----------------------------------------------------------
 
+  const PAGE_SIZE = 20;
+
+  async function loadCustomers(offset: number, replace: boolean) {
+    if (offset === 0) setLoading(true);
+    else setLoadingMore(true);
+
+    try {
+      const response = await authFetch(`/customers?skip=${offset}&limit=${PAGE_SIZE}`);
+      if (!response.ok) throw new Error("Failed to load customers");
+      const data: Customer[] = await response.json();
+      if (replace) {
+        setCustomers(data);
+      } else {
+        setCustomers((prev) => [...prev, ...data]);
+      }
+      setHasMore(data.length === PAGE_SIZE);
+      setSkip(offset + data.length);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to load customers");
+    } finally {
+      setLoading(false);
+      setLoadingMore(false);
+    }
+  }
+
   useEffect(() => {
     if (!isAuthenticated() || !isPharmacist()) return;
-
-    authFetch("/customers?limit=50")
-      .then((response) => {
-        if (!response.ok) throw new Error("Failed to load customers");
-        return response.json();
-      })
-      .then((data: Customer[]) => {
-        setCustomers(data);
-      })
-      .catch((err) => {
-        setError(err instanceof Error ? err.message : "Failed to load customers");
-      })
-      .finally(() => setLoading(false));
+    loadCustomers(0, true);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // ----------------------------------------------------------
@@ -446,6 +463,18 @@ export default function CustomersPage() {
                 </li>
               ))}
             </ul>
+            {hasMore && searchResults === null && (
+              <div className="border-t border-[#edf0ee] px-5 py-4 text-center">
+                <button
+                  type="button"
+                  onClick={() => loadCustomers(skip, false)}
+                  disabled={loadingMore}
+                  className="text-xs font-medium text-[#526c5d] hover:underline disabled:opacity-50"
+                >
+                  {loadingMore ? "Loading…" : "Load more"}
+                </button>
+              </div>
+            )}
           </div>
         )}
       </div>

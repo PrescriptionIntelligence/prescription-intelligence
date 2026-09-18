@@ -4,6 +4,7 @@ import { FormEvent, useEffect, useState } from "react";
 import AppShell from "../../../components/AppShell";
 import { authFetch, isAuthenticated, getUser } from "../../../lib/auth";
 import { useRouter } from "next/navigation";
+import Link from "next/link";
 
 type OrgProfile = {
   id: string;
@@ -14,6 +15,16 @@ type OrgProfile = {
   address: string | null;
   is_active: boolean;
   created_at: string;
+};
+
+type Member = {
+  id: string;
+  name: string;
+  email: string;
+  role: string;
+  is_active: boolean;
+  email_verified: boolean;
+  created_at: string | null;
 };
 
 export default function OrganizationSettingsPage() {
@@ -30,6 +41,10 @@ export default function OrganizationSettingsPage() {
   const [phone, setPhone] = useState("");
   const [email, setEmail] = useState("");
   const [address, setAddress] = useState("");
+
+  // Team members
+  const [members, setMembers] = useState<Member[]>([]);
+  const [membersLoading, setMembersLoading] = useState(true);
 
   useEffect(() => {
     if (!isAuthenticated()) {
@@ -58,6 +73,12 @@ export default function OrganizationSettingsPage() {
         setError(err instanceof Error ? err.message : "Could not load profile");
       })
       .finally(() => setLoading(false));
+
+    authFetch("/users/organization/members")
+      .then((res) => (res.ok ? res.json() : []))
+      .then((data: Member[]) => setMembers(data))
+      .catch(() => setMembers([]))
+      .finally(() => setMembersLoading(false));
   }, [router]);
 
   async function handleSubmit(e: FormEvent) {
@@ -238,22 +259,62 @@ export default function OrganizationSettingsPage() {
             </div>
           )}
 
-          {/* Invite team members */}
-          <div className="mt-8 rounded-2xl border border-[#dfe6e1] bg-white px-6 py-5">
-            <div className="flex items-center justify-between">
+          {/* Team members roster */}
+          <div className="mt-8 rounded-2xl border border-[#dfe6e1] bg-white">
+            <div className="flex items-center justify-between border-b border-[#edf0ee] px-6 py-4">
               <div>
                 <div className="text-sm font-semibold">Team members</div>
-                <p className="mt-1 text-xs text-[#77847d]">
-                  Invite additional pharmacists to join your workspace.
+                <p className="mt-0.5 text-xs text-[#77847d]">
+                  Pharmacists in your organization workspace.
                 </p>
               </div>
-              <a
+              <Link
                 href="/settings/invite"
                 className="rounded-xl border border-[#dfe6e1] px-4 py-2 text-xs font-medium text-[#344f42] transition hover:border-[#b8cfc0] hover:bg-[#f7faf8]"
               >
-                Invite pharmacist →
-              </a>
+                + Invite pharmacist
+              </Link>
             </div>
+
+            {membersLoading ? (
+              <div className="px-6 py-5 text-xs text-[#77847d]">Loading members…</div>
+            ) : members.length === 0 ? (
+              <div className="px-6 py-5 text-xs text-[#77847d]">
+                No team members found.
+              </div>
+            ) : (
+              <ul className="divide-y divide-[#edf0ee]">
+                {members.map((member) => (
+                  <li key={member.id} className="flex items-center justify-between px-6 py-3.5">
+                    <div className="min-w-0">
+                      <div className="flex items-center gap-2">
+                        <span className="text-sm font-medium text-[#17211d]">
+                          {member.name}
+                        </span>
+                        {!member.is_active && (
+                          <span className="rounded-full bg-[#fff0f0] px-2 py-0.5 text-[10px] font-medium text-[#8b4040]">
+                            Inactive
+                          </span>
+                        )}
+                        {member.is_active && !member.email_verified && (
+                          <span className="rounded-full bg-[#fff7df] px-2 py-0.5 text-[10px] font-medium text-[#705617]">
+                            Pending verification
+                          </span>
+                        )}
+                        {member.is_active && member.email_verified && (
+                          <span className="rounded-full bg-[#edf8f1] px-2 py-0.5 text-[10px] font-medium text-[#35664d]">
+                            Active
+                          </span>
+                        )}
+                      </div>
+                      <div className="mt-0.5 text-[11px] text-[#7b8580]">
+                        {member.email}
+                      </div>
+                    </div>
+                  </li>
+                ))}
+              </ul>
+            )}
           </div>
 
         </div>

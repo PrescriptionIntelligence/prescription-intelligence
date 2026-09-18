@@ -1136,6 +1136,23 @@ async def upload_prescription(
 # =========================================================
 
 
+# Valid review_status values that callers may filter by.
+_VALID_REVIEW_STATUSES = {
+    "pending",
+    "under_review",
+    "verified",
+    "rejected",
+    "needs_clarification",
+}
+
+# Valid pipeline status values.
+_VALID_PIPELINE_STATUSES = {
+    "uploaded",
+    "analyzed",
+    "ocr_failed",
+}
+
+
 @app.get(
     "/prescriptions",
     response_model=list[PrescriptionResponse],
@@ -1144,6 +1161,9 @@ async def upload_prescription(
 def list_prescriptions(
     skip: int = 0,
     limit: int = 20,
+    review_status: str | None = None,
+    status: str | None = None,
+    search: str | None = None,
     current_user: UserDB = Depends(
         require_any_authenticated_user
     ),
@@ -1160,6 +1180,11 @@ def list_prescriptions(
 
     Admin:
         All prescriptions.
+
+    Optional query parameters (server-side filtering):
+        review_status: one of pending|under_review|verified|rejected|needs_clarification
+        status: pipeline status – uploaded|analyzed|ocr_failed
+        search: case-insensitive substring match against prescription_id and file_name
     """
 
     if skip < 0:
@@ -1174,6 +1199,24 @@ def list_prescriptions(
             detail="limit must be between 1 and 100",
         )
 
+    if review_status is not None and review_status not in _VALID_REVIEW_STATUSES:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Invalid review_status '{review_status}'. "
+                f"Allowed values: {', '.join(sorted(_VALID_REVIEW_STATUSES))}"
+            ),
+        )
+
+    if status is not None and status not in _VALID_PIPELINE_STATUSES:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Invalid status '{status}'. "
+                f"Allowed values: {', '.join(sorted(_VALID_PIPELINE_STATUSES))}"
+            ),
+        )
+
     query = (
         db.query(PrescriptionDB)
         .options(
@@ -1184,7 +1227,7 @@ def list_prescriptions(
     )
 
     # -----------------------------------------------------
-    # Pharmacist
+    # Tenant / role scope
     # -----------------------------------------------------
 
     if current_user.role == "pharmacist":
@@ -1201,10 +1244,6 @@ def list_prescriptions(
             PrescriptionDB.organization_id
             == current_user.organization_id
         )
-
-    # -----------------------------------------------------
-    # Customer
-    # -----------------------------------------------------
 
     elif current_user.role == "customer":
         customer = (
@@ -1224,10 +1263,6 @@ def list_prescriptions(
             == customer.id
         )
 
-    # -----------------------------------------------------
-    # Admin
-    # -----------------------------------------------------
-
     elif current_user.role == "admin":
         pass
 
@@ -1236,6 +1271,40 @@ def list_prescriptions(
             status_code=403,
             detail="Unsupported user role",
         )
+
+    # -----------------------------------------------------
+    # Optional server-side filters
+    # -----------------------------------------------------
+
+    if review_status is not None:
+        # "pending" is stored as NULL or the literal string "pending"
+        # in legacy rows — handle both.
+        if review_status == "pending":
+            from sqlalchemy import or_
+            query = query.filter(
+                or_(
+                    PrescriptionDB.review_status == "pending",
+                    PrescriptionDB.review_status.is_(None),
+                )
+            )
+        else:
+            query = query.filter(
+                PrescriptionDB.review_status == review_status
+            )
+
+    if status is not None:
+        query = query.filter(
+            PrescriptionDB.status == status
+        )
+
+    if search is not None:
+        term = search.strip()
+        if term:
+            pattern = f"%{term}%"
+            query = query.filter(
+                PrescriptionDB.prescription_id.ilike(pattern)
+                | PrescriptionDB.file_name.ilike(pattern)
+            )
 
     return (
         query
