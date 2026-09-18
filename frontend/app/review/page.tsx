@@ -1514,8 +1514,14 @@ export default function ReviewPage() {
                 Review another prescription →
               </button>
               <Link
-                href="/history"
+                href="/history?review_status=pending"
                 className="rounded-full border border-[#a0c4af] bg-white px-4 py-2 text-xs font-medium text-[#2d6444] transition hover:bg-[#f3fbf5]"
+              >
+                ← Return to Review Queue
+              </Link>
+              <Link
+                href="/history"
+                className="rounded-full border border-[#dce5df] bg-white px-4 py-2 text-xs font-medium text-[#526158] transition hover:bg-[#f4f7f5]"
               >
                 View history
               </Link>

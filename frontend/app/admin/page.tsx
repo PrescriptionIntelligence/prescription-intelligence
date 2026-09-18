@@ -16,9 +16,9 @@ import {
   fetchMe,
   getUser,
   isAuthenticated,
-  logout,
   User,
 } from "../../lib/auth";
+import AppShell from "../../components/AppShell";
 
 type StatCardProps = {
   label: string;
@@ -92,11 +92,22 @@ function AdminAction({
   );
 }
 
+type AdminStats = {
+  total_users: number;
+  total_organizations: number;
+  total_prescriptions: number;
+  pending_reviews: number;
+  under_review: number;
+};
+
 export default function AdminPage() {
   const router = useRouter();
 
   const [user, setUser] = useState<User | null>(null);
   const [loading, setLoading] = useState(true);
+  const [stats, setStats] = useState<AdminStats | null>(null);
+  const [statsLoading, setStatsLoading] = useState(true);
+  const [statsError, setStatsError] = useState("");
 
   useEffect(() => {
     async function loadAdmin() {
@@ -131,23 +142,42 @@ export default function AdminPage() {
     loadAdmin();
   }, [router]);
 
+  // Fetch platform stats once user is confirmed admin
+  useEffect(() => {
+    if (!user || user.role !== "admin") return;
+
+    setStatsLoading(true);
+    import("../../lib/auth").then(({ authFetch }) => {
+      authFetch("/admin/stats")
+        .then((res) => {
+          if (!res.ok) throw new Error("Failed to load stats");
+          return res.json();
+        })
+        .then((data: AdminStats) => setStats(data))
+        .catch(() => setStatsError("Statistics unavailable"))
+        .finally(() => setStatsLoading(false));
+    });
+  }, [user]);
+
   if (loading) {
     return (
-      <main className="min-h-screen bg-[#F4F7F5] px-6 py-8">
-        <div className="mx-auto max-w-7xl">
-          <div className="h-8 w-56 animate-pulse rounded-lg bg-[#DFE6E1]" />
-          <div className="mt-3 h-4 w-80 animate-pulse rounded bg-[#DFE6E1]" />
+      <AppShell>
+        <main className="min-h-screen bg-[#F4F7F5] px-6 py-8">
+          <div className="mx-auto max-w-7xl">
+            <div className="h-8 w-56 animate-pulse rounded-lg bg-[#DFE6E1]" />
+            <div className="mt-3 h-4 w-80 animate-pulse rounded bg-[#DFE6E1]" />
 
-          <div className="mt-8 grid gap-4 md:grid-cols-2 xl:grid-cols-4">
-            {[1, 2, 3, 4].map((item) => (
-              <div
-                key={item}
-                className="h-36 animate-pulse rounded-2xl bg-white"
-              />
-            ))}
+            <div className="mt-8 grid gap-4 md:grid-cols-2 xl:grid-cols-4">
+              {[1, 2, 3, 4].map((item) => (
+                <div
+                  key={item}
+                  className="h-36 animate-pulse rounded-2xl bg-white"
+                />
+              ))}
+            </div>
           </div>
-        </div>
-      </main>
+        </main>
+      </AppShell>
     );
   }
 
@@ -155,8 +185,12 @@ export default function AdminPage() {
     return null;
   }
 
+  const statValue = (val: number | undefined) =>
+    statsLoading ? "—" : val !== undefined ? String(val) : "—";
+
   return (
-    <main className="min-h-screen bg-[#F4F7F5]">
+    <AppShell>
+      <main className="min-h-screen bg-[#F4F7F5]">
       <div className="mx-auto max-w-7xl px-6 py-8 lg:px-8">
         {/* Header */}
         <div className="flex flex-col gap-5 border-b border-[#DFE6E1] pb-7 md:flex-row md:items-end md:justify-between">
@@ -180,17 +214,6 @@ export default function AdminPage() {
             <div className="rounded-xl border border-[#CBE0D3] bg-[#EDF8F1] px-3 py-2 text-sm font-medium text-[#35664D]">
               Administrator
             </div>
-
-            <button
-              type="button"
-              onClick={() => {
-                logout();
-                router.replace("/sign-in");
-              }}
-              className="rounded-xl border border-[#DFE6E1] bg-white px-4 py-2 text-sm font-medium text-[#526158] transition hover:border-[#CBE0D3] hover:text-[#17211D]"
-            >
-              Sign out
-            </button>
           </div>
         </div>
 
@@ -205,32 +228,38 @@ export default function AdminPage() {
             </p>
           </div>
 
+          {statsError && (
+            <div className="mb-4 rounded-xl border border-[#EAD8D2] bg-[#FBF5F2] px-4 py-3 text-xs text-[#8B5547]">
+              {statsError}
+            </div>
+          )}
+
           <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
             <StatCard
               label="Users"
-              value="—"
+              value={statValue(stats?.total_users)}
               description="Registered platform users"
               icon={<Users size={20} />}
             />
 
             <StatCard
               label="Pharmacies"
-              value="—"
+              value={statValue(stats?.total_organizations)}
               description="Connected organizations"
               icon={<Building2 size={20} />}
             />
 
             <StatCard
               label="Prescriptions"
-              value="—"
+              value={statValue(stats?.total_prescriptions)}
               description="Analyses processed"
               icon={<FileText size={20} />}
             />
 
             <StatCard
-              label="Reviews"
-              value="—"
-              description="Clinical reviews requiring attention"
+              label="Pending reviews"
+              value={statValue(stats?.pending_reviews)}
+              description="Prescriptions awaiting pharmacist review"
               icon={<ClipboardCheck size={20} />}
             />
           </div>
@@ -300,6 +329,7 @@ export default function AdminPage() {
           </div>
         </section>
       </div>
-    </main>
+      </main>
+    </AppShell>
   );
 }

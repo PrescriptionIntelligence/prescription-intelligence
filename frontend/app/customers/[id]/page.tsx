@@ -76,7 +76,7 @@ function formatDateTime(iso: string): string {
 
 function reviewBadge(status: string) {
   const s = status.toLowerCase();
-  if (s === "approved")
+  if (s === "verified")
     return "bg-[#edf8f1] text-[#2d6444] border-[#cce3d4]";
   if (s === "rejected")
     return "bg-[#fff0f0] text-[#7b2929] border-[#eccaca]";
@@ -119,6 +119,10 @@ export default function CustomerDetailPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [rxLoading, setRxLoading] = useState(false);
+  const [rxSkip, setRxSkip] = useState(0);
+  const [rxHasMore, setRxHasMore] = useState(false);
+  const [rxLoadingMore, setRxLoadingMore] = useState(false);
+  const RX_PAGE = 20;
 
   // ----------------------------------------------------------
   // Auth guard
@@ -152,26 +156,38 @@ export default function CustomerDetailPage() {
   }, [customerId]);
 
   // ----------------------------------------------------------
-  // Load prescriptions
+  // Load prescriptions (paginated)
   // ----------------------------------------------------------
+
+  async function loadPrescriptions(offset: number, replace: boolean) {
+    if (offset === 0) setRxLoading(true);
+    else setRxLoadingMore(true);
+
+    try {
+      const response = await authFetch(
+        `/customers/${encodeURIComponent(customerId)}/prescriptions?skip=${offset}&limit=${RX_PAGE}`
+      );
+      if (!response.ok) return;
+      const data: Prescription[] = await response.json();
+      if (replace) {
+        setPrescriptions(data);
+      } else {
+        setPrescriptions((prev) => [...prev, ...data]);
+      }
+      setRxHasMore(data.length === RX_PAGE);
+      setRxSkip(offset + data.length);
+    } catch {
+      // Non-fatal
+    } finally {
+      setRxLoading(false);
+      setRxLoadingMore(false);
+    }
+  }
 
   useEffect(() => {
     if (!customer || !isAuthenticated()) return;
-
-    setRxLoading(true);
-
-    authFetch(`/customers/${encodeURIComponent(customerId)}/prescriptions?limit=20`)
-      .then((response) => {
-        if (!response.ok) return [];
-        return response.json();
-      })
-      .then((data: Prescription[]) => {
-        setPrescriptions(data);
-      })
-      .catch(() => {
-        // Non-fatal — prescription list just won't show
-      })
-      .finally(() => setRxLoading(false));
+    loadPrescriptions(0, true);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [customer, customerId]);
 
   // ----------------------------------------------------------
@@ -416,6 +432,18 @@ export default function CustomerDetailPage() {
                     );
                   })}
                 </ul>
+                {rxHasMore && (
+                  <div className="border-t border-[#edf0ee] px-5 py-4 text-center">
+                    <button
+                      type="button"
+                      onClick={() => loadPrescriptions(rxSkip, false)}
+                      disabled={rxLoadingMore}
+                      className="text-xs font-medium text-[#526c5d] hover:underline disabled:opacity-50"
+                    >
+                      {rxLoadingMore ? "Loading…" : "Load more"}
+                    </button>
+                  </div>
+                )}
               </div>
             )}
           </section>

@@ -68,6 +68,10 @@ type Prescription = {
   medicines: Medicine[];
 };
 
+type ReviewState = {
+  review_status: string;
+};
+
 // =========================================================
 // Helpers
 // =========================================================
@@ -293,6 +297,14 @@ export default function AnalysisDetailPage() {
   const assignSearchRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // -------------------------------------------------------
+  // Review state (loaded from API for queue-originated visits)
+  // -------------------------------------------------------
+
+  const [reviewState, setReviewState] = useState<ReviewState | null>(null);
+  const [reviewActionLoading, setReviewActionLoading] = useState(false);
+  const [reviewActionError, setReviewActionError] = useState("");
+
+  // -------------------------------------------------------
   // Download report
   // -------------------------------------------------------
 
@@ -463,6 +475,60 @@ export default function AnalysisDetailPage() {
   };
 
   // -------------------------------------------------------
+  // Begin / Continue Review (queue-originated flow)
+  // Used when the prescription is pending or under_review.
+  // Calls the server review API then redirects to /review.
+  // -------------------------------------------------------
+
+  const handleBeginReview = async () => {
+    if (!prescription) return;
+    setReviewActionLoading(true);
+    setReviewActionError("");
+    try {
+      const response = await authFetch(
+        `/prescriptions/${encodeURIComponent(prescriptionId)}/review`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ action: "start_review" }),
+        }
+      );
+      if (!response.ok) {
+        const body = await response.json().catch(() => null);
+        throw new Error(body?.detail || "Unable to start review.");
+      }
+      // Transition succeeded — redirect to the full review workspace.
+      sessionStorage.setItem(
+        "prescription_review",
+        JSON.stringify(prescription)
+      );
+      sessionStorage.setItem(
+        "prescription_file_name",
+        prescription.file_name || "uploaded prescription"
+      );
+      window.location.href = "/review";
+    } catch (err) {
+      setReviewActionError(
+        err instanceof Error ? err.message : "Unable to start review."
+      );
+      setReviewActionLoading(false);
+    }
+  };
+
+  const handleContinueReview = () => {
+    if (!prescription) return;
+    sessionStorage.setItem(
+      "prescription_review",
+      JSON.stringify(prescription)
+    );
+    sessionStorage.setItem(
+      "prescription_file_name",
+      prescription.file_name || "uploaded prescription"
+    );
+    window.location.href = "/review";
+  };
+
+  // -------------------------------------------------------
   // Load prescription
   // -------------------------------------------------------
 
@@ -564,6 +630,28 @@ export default function AnalysisDetailPage() {
         setLoading(false);
       });
     }, [prescriptionId]);
+
+  // -------------------------------------------------------
+  // Load review state from API (enables Begin/Continue Review)
+  // -------------------------------------------------------
+
+  useEffect(() => {
+    if (!prescriptionId || !isAuthenticated()) return;
+
+    authFetch(`/prescriptions/${encodeURIComponent(prescriptionId)}/review`)
+      .then((response) => {
+        if (response.ok) return response.json();
+        return null;
+      })
+      .then((data) => {
+        if (data?.review_status) {
+          setReviewState({ review_status: data.review_status });
+        }
+      })
+      .catch(() => {
+        // Non-critical: review state unavailable, buttons simply won't show.
+      });
+  }, [prescriptionId]);
 
   // -------------------------------------------------------
   // Load prescription image (authenticated)
@@ -900,7 +988,39 @@ export default function AnalysisDetailPage() {
                   {statusLabel}
                 </span>
 
-                {needsReview ? (
+                {isPharmacistUser && reviewState?.review_status === "pending" && (
+                  <button
+                    type="button"
+                    onClick={handleBeginReview}
+                    disabled={reviewActionLoading}
+                    className="inline-flex items-center gap-2 rounded-xl border border-[#d6b96d] bg-[#fff9e8] px-4 py-2.5 text-xs font-semibold text-[#725719] shadow-sm transition hover:bg-[#fff4d2] disabled:cursor-not-allowed disabled:opacity-60"
+                  >
+                    {reviewActionLoading ? (
+                      <>
+                        <span className="h-3.5 w-3.5 animate-spin rounded-full border-2 border-[#a47b2c]/30 border-t-[#a47b2c]" />
+                        Starting…
+                      </>
+                    ) : (
+                      <>
+                        <span className="text-sm leading-none">✓</span>
+                        Begin Review
+                      </>
+                    )}
+                  </button>
+                )}
+
+                {isPharmacistUser && reviewState?.review_status === "under_review" && (
+                  <button
+                    type="button"
+                    onClick={handleContinueReview}
+                    className="inline-flex items-center gap-2 rounded-xl border border-[#d6b96d] bg-[#fff9e8] px-4 py-2.5 text-xs font-semibold text-[#725719] shadow-sm transition hover:bg-[#fff4d2]"
+                  >
+                    <span className="text-sm leading-none">→</span>
+                    Continue Review
+                  </button>
+                )}
+
+                {!reviewState?.review_status && needsReview ? (
                   <button
                     type="button"
                     onClick={
@@ -913,7 +1033,7 @@ export default function AnalysisDetailPage() {
                     </span>
                     Review prescription
                   </button>
-                ) : isPharmacistUser && prescription ? (
+                ) : !reviewState?.review_status && isPharmacistUser && prescription ? (
                   <button
                     type="button"
                     onClick={handleReviewPrescription}
@@ -953,6 +1073,12 @@ export default function AnalysisDetailPage() {
             {reportError && (
               <div className="mt-4 rounded-xl border border-[#eccaca] bg-[#fff7f7] px-4 py-3 text-xs text-[#8b4040]">
                 {reportError}
+              </div>
+            )}
+
+            {reviewActionError && (
+              <div className="mt-4 rounded-xl border border-[#eccaca] bg-[#fff7f7] px-4 py-3 text-xs text-[#8b4040]">
+                {reviewActionError}
               </div>
             )}
           </div>
