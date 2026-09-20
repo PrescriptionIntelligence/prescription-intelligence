@@ -3679,9 +3679,10 @@ class TestResendVerificationSecurity:
         )
 
         assert response.status_code == 200
-        assert response.json() == {
-            "message": "Email address is already verified."
-        }
+        # F-01/F-09: verified accounts now return the same generic response
+        # to prevent verification-status enumeration.
+        body = response.json()
+        assert "if an account exists" in body["message"].lower()
 
     def test_resend_generates_hashed_token_and_30_minute_expiry(
         self,

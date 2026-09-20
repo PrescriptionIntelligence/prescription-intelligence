@@ -234,6 +234,12 @@ def test_check_limit_does_not_raise_on_service_error():
 
 
 def test_increment_usage_increases_count():
+    """
+    For same-period increments the implementation uses a SQL-level
+    UPDATE expression (atomic increment).  With a MagicMock db the
+    execute() call is a no-op, so we verify the correct code path was
+    taken by asserting db.execute was called (not a plain ORM assignment).
+    """
     now = datetime.now(timezone.utc)
     plan = MagicMock(spec=OrganizationPlanDB)
     plan.id = uuid4()
@@ -250,7 +256,11 @@ def test_increment_usage_increases_count():
         db=db,
     )
 
-    assert plan.period_prescription_count == 6
+    # The atomic path calls db.execute() with a SQL UPDATE statement.
+    # With a MagicMock db this is a no-op, but the call must have happened.
+    db.execute.assert_called_once()
+    # db.flush must also have been called to expose the change in-transaction.
+    db.flush.assert_called()
 
 
 def test_increment_usage_resets_on_new_period():

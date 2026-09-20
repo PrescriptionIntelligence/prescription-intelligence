@@ -19,11 +19,16 @@ from fastapi import (
     FastAPI,
     File,
     HTTPException,
+    Request,
     UploadFile,
 )
 
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
+from slowapi import _rate_limit_exceeded_handler
+from slowapi.errors import RateLimitExceeded
+from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.types import ASGIApp
 
 from sqlalchemy import func
 from sqlalchemy.orm import Session, selectinload
@@ -89,6 +94,8 @@ MAX_UPLOAD_BYTES = 10 * 1024 * 1024
 # FASTAPI APPLICATION
 # =========================================================
 
+from backend.rate_limit import limiter
+
 app = FastAPI(
     title="Prescription Intelligence API",
     description=(
@@ -97,6 +104,12 @@ app = FastAPI(
     ),
     version="1.0.0",
 )
+
+# Attach the limiter to the app so slowapi can locate it.
+app.state.limiter = limiter
+
+# Return HTTP 429 with a plain JSON body (never leaks account info).
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
 
 # =========================================================
@@ -126,6 +139,48 @@ app.add_middleware(
     allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     allow_headers=["Authorization", "Content-Type", "Accept"],
 )
+
+
+# =========================================================
+# SECURITY HEADERS
+# =========================================================
+
+class SecurityHeadersMiddleware(BaseHTTPMiddleware):
+    """
+    Add minimal security headers to every response.
+
+    Always added:
+        X-Content-Type-Options: nosniff
+        X-Frame-Options: DENY
+        Referrer-Policy: strict-origin-when-cross-origin
+
+    Only added when the request arrived over HTTPS
+    (X-Forwarded-Proto: https from a reverse proxy, or a
+    direct TLS connection):
+        Strict-Transport-Security: max-age=31536000; includeSubDomains
+
+    HSTS is intentionally withheld for plain HTTP so local
+    development continues to work without requiring TLS.
+    """
+
+    async def dispatch(self, request, call_next):
+        response = await call_next(request)
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        response.headers["X-Frame-Options"] = "DENY"
+        response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+        # Only set HSTS when the connection is over HTTPS.
+        forwarded_proto = request.headers.get("x-forwarded-proto", "")
+        if (
+            forwarded_proto.lower() == "https"
+            or request.url.scheme == "https"
+        ):
+            response.headers["Strict-Transport-Security"] = (
+                "max-age=31536000; includeSubDomains"
+            )
+        return response
+
+
+app.add_middleware(SecurityHeadersMiddleware)
 
 
 # =========================================================
@@ -660,18 +715,11 @@ def create_prescription(
     except Exception as exc:
         db.rollback()
 
-        logger.error(
-            "Failed to save prescription: %s",
-            exc,
-            exc_info=True,
-        )
+        logger.exception("Failed to save prescription: %s", exc)
 
         raise HTTPException(
             status_code=500,
-            detail=(
-                "Failed to save prescription: "
-                f"{str(exc)}"
-            ),
+            detail="An internal error occurred. Please try again or contact support.",
         )
 
     return db_prescription
@@ -770,6 +818,32 @@ async def upload_prescription(
         )
 
     # -----------------------------------------------------
+    # Magic-byte validation
+    #
+    # Validate actual file signature BEFORE writing to disk.
+    # The client-supplied Content-Type is only used for the
+    # allowed-types check above; this check inspects bytes.
+    #
+    # JPEG:  FF D8 FF
+    # PNG:   89 50 4E 47  (‰PNG)
+    # -----------------------------------------------------
+
+    _MAGIC_JPEG = b"\xff\xd8\xff"
+    _MAGIC_PNG = b"\x89PNG"
+
+    if not (
+        contents[:3] == _MAGIC_JPEG
+        or contents[:4] == _MAGIC_PNG
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "File content does not match a supported image format. "
+                "Only JPEG and PNG files are accepted."
+            ),
+        )
+
+    # -----------------------------------------------------
     # Save image
     # -----------------------------------------------------
 
@@ -781,12 +855,10 @@ async def upload_prescription(
             buffer.write(contents)
 
     except Exception as exc:
+        logger.exception("Failed to save uploaded file: %s", exc)
         raise HTTPException(
             status_code=500,
-            detail=(
-                "Failed to save uploaded file: "
-                f"{str(exc)}"
-            ),
+            detail="An internal error occurred. Please try again or contact support.",
         )
 
     # -----------------------------------------------------
@@ -805,12 +877,10 @@ async def upload_prescription(
             missing_ok=True
         )
 
+        logger.warning("Invalid or corrupted image file: %s", exc)
         raise HTTPException(
             status_code=400,
-            detail=(
-                "Invalid or corrupted image file: "
-                f"{str(exc)}"
-            ),
+            detail="The uploaded file is not a valid image.",
         )
 
     # -----------------------------------------------------
@@ -823,18 +893,11 @@ async def upload_prescription(
         )
 
     except Exception as exc:
-        logger.error(
-            "OCR processing error: %s",
-            exc,
-            exc_info=True,
-        )
+        logger.exception("OCR processing error: %s", exc)
 
         raise HTTPException(
             status_code=500,
-            detail=(
-                "OCR processing failed: "
-                f"{str(exc)}"
-            ),
+            detail="An internal error occurred. Please try again or contact support.",
         )
 
     # =====================================================
@@ -879,13 +942,10 @@ async def upload_prescription(
 
         except Exception as exc:
             db.rollback()
-
+            logger.exception("Failed to save OCR failure record: %s", exc)
             raise HTTPException(
                 status_code=500,
-                detail=(
-                    "Failed to save OCR failure: "
-                    f"{str(exc)}"
-                ),
+                detail="An internal error occurred. Please try again or contact support.",
             )
 
         return {
@@ -921,18 +981,11 @@ async def upload_prescription(
         )
 
     except Exception as exc:
-        logger.error(
-            "Pipeline error: %s",
-            exc,
-            exc_info=True,
-        )
+        logger.exception("Prescription pipeline error: %s", exc)
 
         raise HTTPException(
             status_code=500,
-            detail=(
-                "Prescription processing failed: "
-                f"{str(exc)}"
-            ),
+            detail="An internal error occurred. Please try again or contact support.",
         )
 
     medicines = analysis.get(
@@ -1088,18 +1141,11 @@ async def upload_prescription(
     except Exception as exc:
         db.rollback()
 
-        logger.error(
-            "Failed to save analyzed prescription: %s",
-            exc,
-            exc_info=True,
-        )
+        logger.exception("Failed to save analyzed prescription: %s", exc)
 
         raise HTTPException(
             status_code=500,
-            detail=(
-                "Failed to save prescription: "
-                f"{str(exc)}"
-            ),
+            detail="An internal error occurred. Please try again or contact support.",
         )
 
     if medicines:

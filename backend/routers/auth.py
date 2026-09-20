@@ -1,11 +1,12 @@
 from datetime import datetime, timedelta, timezone
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.security import OAuth2PasswordRequestForm
 from pydantic import BaseModel, EmailStr, Field
 from sqlalchemy.orm import Session
 
 from backend.database import get_db
+from backend.rate_limit import limiter
 from backend.models import (
     CustomerDB,
     OrganizationDB,
@@ -356,8 +357,10 @@ def _authenticate(
     "/register",
     status_code=status.HTTP_201_CREATED,
 )
+@limiter.limit("5/minute")
 def register(
-    request: RegisterRequest,
+    body: RegisterRequest,
+    request: Request,
     db: Session = Depends(get_db),
 ):
     """
@@ -379,7 +382,7 @@ def register(
     """
 
     normalized_email = _normalize_email(
-        request.email
+        body.email
     )
 
     # -----------------------------------------------------
@@ -405,7 +408,7 @@ def register(
     # -----------------------------------------------------
 
     base_slug = (
-        request.pharmacy_name
+        body.pharmacy_name
         .strip()
         .lower()
         .replace(" ", "-")
@@ -439,7 +442,7 @@ def register(
     # -----------------------------------------------------
 
     organization = OrganizationDB(
-        name=request.pharmacy_name.strip(),
+        name=body.pharmacy_name.strip(),
         slug=slug,
     )
 
@@ -452,10 +455,10 @@ def register(
 
     user = UserDB(
         organization_id=organization.id,
-        name=request.name.strip(),
+        name=body.name.strip(),
         email=normalized_email,
         password_hash=hash_password(
-            request.password
+            body.password
         ),
         role="pharmacist",
         email_verified=False,
@@ -545,8 +548,10 @@ def register(
     "/register/customer",
     status_code=status.HTTP_201_CREATED,
 )
+@limiter.limit("5/minute")
 def register_customer(
-    request: CustomerRegisterRequest,
+    body: CustomerRegisterRequest,
+    request: Request,
     db: Session = Depends(get_db),
 ):
     """
@@ -559,7 +564,7 @@ def register_customer(
     """
 
     normalized_email = _normalize_email(
-        request.email
+        body.email
     )
 
     # -----------------------------------------------------
@@ -596,10 +601,10 @@ def register_customer(
 
     user = UserDB(
         organization_id=None,
-        name=request.name.strip(),
+        name=body.name.strip(),
         email=normalized_email,
         password_hash=hash_password(
-            request.password
+            body.password
         ),
         role="customer",
         email_verified=False,
@@ -671,8 +676,8 @@ def register_customer(
         },
         "customer": {
             "profile_linked": False,
-            "customer_code": request.customer_code,
-            "phone": request.phone,
+            "customer_code": body.customer_code,
+            "phone": body.phone,
         },
     }
 
@@ -685,8 +690,10 @@ def register_customer(
     "/verify-email",
     response_model=EmailVerificationResponse,
 )
+@limiter.limit("10/minute")
 def verify_email(
-    request: VerifyEmailRequest,
+    body: VerifyEmailRequest,
+    request: Request,
     db: Session = Depends(get_db),
 ):
     """
@@ -699,7 +706,7 @@ def verify_email(
     """
 
     normalized_email = _normalize_email(
-        request.email
+        body.email
     )
 
     user = (
@@ -758,7 +765,7 @@ def verify_email(
     # -----------------------------------------------------
 
     if not verify_email_verification_token(
-        request.token,
+        body.token,
         user.email_verification_token_hash,
     ):
         raise HTTPException(
@@ -793,8 +800,10 @@ def verify_email(
 @router.post(
     "/resend-verification",
 )
+@limiter.limit("5/minute")
 def resend_verification(
-    request: ResendVerificationRequest,
+    body: ResendVerificationRequest,
+    request: Request,
     db: Session = Depends(get_db),
 ):
     """
@@ -802,6 +811,8 @@ def resend_verification(
 
     Security properties:
         - generic response prevents account enumeration
+        - invited-pharmacist accounts are detected and protected:
+          their invitation token is never overwritten by this endpoint
         - 60-second database-backed resend cooldown
         - previous token is replaced
         - new token expires after 30 minutes
@@ -811,7 +822,7 @@ def resend_verification(
     RESEND_COOLDOWN_SECONDS = 60
 
     normalized_email = _normalize_email(
-        request.email
+        body.email
     )
 
     generic_response = {
@@ -836,10 +847,32 @@ def resend_verification(
     if not user:
         return generic_response
 
-    if user.email_verified:
+    # -----------------------------------------------------
+    # Invited-pharmacist guard
+    #
+    # An invited pharmacist has is_active=False,
+    # email_verified=False, and a 72-hour invitation token.
+    # Replacing that token here would silently destroy the
+    # invite flow.  Return a specific message so the invitee
+    # knows what to do, but do NOT confirm email existence
+    # to unauthenticated callers who do not already know.
+    # -----------------------------------------------------
+
+    if (
+        not user.is_active
+        and user.role == "pharmacist"
+        and not user.email_verified
+    ):
         return {
-            "message": "Email address is already verified."
+            "message": (
+                "This account is awaiting invitation acceptance. "
+                "Please use the original invitation email or ask "
+                "the inviting pharmacist to send a new invitation."
+            )
         }
+
+    if user.email_verified:
+        return generic_response
 
     # -----------------------------------------------------
     # Resend cooldown
@@ -937,8 +970,10 @@ def resend_verification(
 # =========================================================
 
 @router.post("/login")
+@limiter.limit("10/minute")
 def login(
-    request: LoginRequest,
+    body: LoginRequest,
+    request: Request,
     db: Session = Depends(get_db),
 ):
     """
@@ -954,8 +989,8 @@ def login(
     """
 
     return _authenticate(
-        email=request.email,
-        password=request.password,
+        email=body.email,
+        password=body.password,
         db=db,
     )
 
@@ -974,7 +1009,9 @@ def login(
         "Used by Swagger Authorize."
     ),
 )
+@limiter.limit("10/minute")
 def token(
+    request: Request,
     form_data: OAuth2PasswordRequestForm = Depends(),
     db: Session = Depends(get_db),
 ):
@@ -1000,8 +1037,10 @@ def token(
     "/forgot-password",
     response_model=PasswordResetResponse,
 )
+@limiter.limit("5/minute")
 def forgot_password(
-    request: ForgotPasswordRequest,
+    body: ForgotPasswordRequest,
+    request: Request,
     db: Session = Depends(get_db),
 ):
     """
@@ -1023,7 +1062,7 @@ def forgot_password(
         )
     )
 
-    normalized_email = _normalize_email(request.email)
+    normalized_email = _normalize_email(body.email)
 
     user = (
         db.query(UserDB)
@@ -1094,8 +1133,10 @@ def forgot_password(
     "/reset-password",
     response_model=PasswordResetResponse,
 )
+@limiter.limit("5/minute")
 def reset_password(
-    request: ResetPasswordRequest,
+    body: ResetPasswordRequest,
+    request: Request,
     db: Session = Depends(get_db),
 ):
     """
@@ -1108,7 +1149,7 @@ def reset_password(
     response.
     """
 
-    token_hash = hash_password_reset_token(request.token)
+    token_hash = hash_password_reset_token(body.token)
 
     reset_record = (
         db.query(PasswordResetTokenDB)
@@ -1157,7 +1198,7 @@ def reset_password(
     # ---------------------------------------------------------
 
     if not verify_password_reset_token(
-        request.token,
+        body.token,
         reset_record.token_hash,
     ):
         raise HTTPException(
@@ -1185,7 +1226,7 @@ def reset_password(
     # Update password and invalidate token atomically
     # ---------------------------------------------------------
 
-    user.password_hash = hash_password(request.new_password)
+    user.password_hash = hash_password(body.new_password)
     reset_record.used_at = now
 
     try:
@@ -1216,8 +1257,10 @@ class AcceptInviteRequest(BaseModel):
 
 
 @router.post("/accept-invite")
+@limiter.limit("10/minute")
 def accept_invite(
-    request: AcceptInviteRequest,
+    body: AcceptInviteRequest,
+    request: Request,
     db: Session = Depends(get_db),
 ):
     """
@@ -1230,7 +1273,7 @@ def accept_invite(
     Regular login is blocked until this step completes.
     """
 
-    normalized_email = _normalize_email(request.email)
+    normalized_email = _normalize_email(body.email)
 
     user = (
         db.query(UserDB)
@@ -1269,7 +1312,7 @@ def accept_invite(
         )
 
     if not verify_email_verification_token(
-        request.token,
+        body.token,
         user.email_verification_token_hash,
     ):
         raise HTTPException(
@@ -1278,7 +1321,7 @@ def accept_invite(
         )
 
     # Set password, verify, and activate atomically.
-    user.password_hash = hash_password(request.password)
+    user.password_hash = hash_password(body.password)
     user.email_verified = True
     user.is_active = True
     user.email_verification_token_hash = None

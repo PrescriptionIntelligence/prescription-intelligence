@@ -1,8 +1,11 @@
+import logging
 from datetime import datetime, timezone
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
+
+logger = logging.getLogger(__name__)
 
 from backend.auth import require_pharmacist
 from backend.database import get_db
@@ -690,12 +693,11 @@ def review_prescription(
     except Exception as exc:
         db.rollback()
 
+        logger.exception("Failed to save prescription review: %s", exc)
+
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=(
-                "Failed to save prescription review: "
-                f"{str(exc)}"
-            ),
+            detail="An internal error occurred. Please try again or contact support.",
         )
 
     high_priority = (

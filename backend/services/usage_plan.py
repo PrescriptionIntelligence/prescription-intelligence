@@ -28,6 +28,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from fastapi import HTTPException, status
+from sqlalchemy import update
 from sqlalchemy.orm import Session
 
 from backend.models import OrganizationPlanDB
@@ -253,11 +254,23 @@ def increment_prescription_usage(
     db: Session,
 ) -> None:
     """
-    Increment the organization's prescription usage counter
+    Atomically increment the organization's prescription usage counter
     for the current period.
 
     Called after a successful prescription analysis upload.
     This must be called inside an existing transaction.
+
+    Concurrency safety:
+        Uses a SQL-level UPDATE with a column expression
+        (count = count + 1) so that concurrent transactions each
+        observe the committed value rather than a Python-cached copy.
+        This prevents the lost-update race where two simultaneous
+        uploads both read the same count and both write count+1.
+
+        Period-reset (new billing month) still goes through ORM
+        assignment because it resets to 1 and updates period_start
+        simultaneously; that path is inherently single-increment so
+        the race is not relevant there.
     """
 
     try:
@@ -267,16 +280,32 @@ def increment_prescription_usage(
         )
 
         if _is_new_period(plan):
+            # New billing period: reset counter to 1 and record
+            # the new period start.  ORM assignment is safe here
+            # because a new period is always a reset-to-1, not an
+            # accumulation; no lost-update risk.
             plan.period_prescription_count = 1
             plan.period_start = datetime.now(timezone.utc)
+            db.flush()
         else:
-            plan.period_prescription_count = (
-                plan.period_prescription_count + 1
+            # Same billing period: use a SQL-level atomic increment
+            # so concurrent transactions cannot lose updates.
+            #
+            # synchronize_session="evaluate" keeps the in-memory ORM
+            # object consistent without an extra SELECT round-trip.
+            db.execute(
+                update(OrganizationPlanDB)
+                .where(OrganizationPlanDB.id == plan.id)
+                .values(
+                    period_prescription_count=(
+                        OrganizationPlanDB.period_prescription_count + 1
+                    )
+                )
+                .execution_options(synchronize_session="evaluate")
             )
-
-        # db.flush() ensures the update is included in the
-        # caller's commit rather than opening a new transaction.
-        db.flush()
+            # Flush so the counter change is visible to subsequent
+            # queries in the same transaction (e.g. check_prescription_limit).
+            db.flush()
 
     except Exception as exc:
         # Never fail a prescription upload because of a usage

@@ -13,6 +13,8 @@ dnspython==2.8.0
 ecdsa==0.19.2
 email-validator==2.3.0
 fastapi==0.141.1
+limits==5.8.0
+slowapi==0.1.9
 greenlet==3.5.5
 h11==0.16.0
 httpcore==1.0.9
