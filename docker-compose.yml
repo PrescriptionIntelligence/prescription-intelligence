@@ -59,7 +59,8 @@ services:
       ENVIRONMENT: ${ENVIRONMENT:-production}
       SECRET_KEY: ${SECRET_KEY:?SECRET_KEY is required}
       CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:3000}
-      # Email (optional — registration works without email if SMTP is unset)
+      # Email — required for production email verification.
+      # All SMTP_* variables must be configured together.
       SMTP_HOST: ${SMTP_HOST:-}
       SMTP_PORT: ${SMTP_PORT:-587}
       SMTP_USERNAME: ${SMTP_USERNAME:-}
@@ -111,6 +112,7 @@ services:
       context: .
       dockerfile: Dockerfile.frontend
       args:
+        # Build-time value. Use the publicly reachable HTTPS API URL in production.
         NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:8000}
     restart: unless-stopped
     depends_on:
