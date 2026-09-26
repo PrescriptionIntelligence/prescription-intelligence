@@ -58,7 +58,7 @@ services:
       # Application
       ENVIRONMENT: ${ENVIRONMENT:-production}
       SECRET_KEY: ${SECRET_KEY:?SECRET_KEY is required}
-      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:3000}
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:3000,http://127.0.0.1:3000}
       # Email — required for production email verification.
       # All SMTP_* variables must be configured together.
       SMTP_HOST: ${SMTP_HOST:-}
