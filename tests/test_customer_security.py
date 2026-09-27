@@ -553,3 +553,87 @@ class TestCustomerPrescriptionIsolation:
         assert response.json()["detail"] == (
             "Prescription not found"
         )
+
+
+class TestAssignedCustomerInPrescriptionResponse:
+    """
+    Tests that GET /prescriptions/{id} returns assigned_customer
+    metadata when a customer is assigned, and that the field is
+    absent (or None) when no customer is assigned.
+
+    Also verifies that a pharmacist from a different organization
+    cannot observe another organization's prescription data.
+    """
+
+    def test_prescription_with_assigned_customer_includes_metadata(
+        self,
+        security_environment,
+    ):
+        """
+        A pharmacist loading a prescription that has an assigned customer
+        receives the assigned_customer field with id, name, customer_code.
+        """
+        env = security_environment
+
+        # prescription_a was created with customer=customer in the fixture.
+        set_current_user(env["pharmacist_a"])
+
+        response = env["client"].get(
+            f"/prescriptions/{env['prescription_a'].prescription_id}"
+        )
+
+        assert response.status_code == 200
+
+        body = response.json()
+
+        assert "assigned_customer" in body
+        assert body["assigned_customer"] is not None
+
+        ac = body["assigned_customer"]
+
+        assert ac["id"] == str(env["customer"].id)
+        assert ac["name"] == env["customer"].name
+        assert ac["customer_code"] == env["customer"].customer_code
+
+    def test_prescription_without_assigned_customer_returns_none(
+        self,
+        security_environment,
+    ):
+        """
+        A prescription with no customer assigned returns
+        assigned_customer = null.
+        """
+        env = security_environment
+
+        # prescription_b has no customer assigned in the fixture.
+        set_current_user(env["pharmacist_b"])
+
+        response = env["client"].get(
+            f"/prescriptions/{env['prescription_b'].prescription_id}"
+        )
+
+        assert response.status_code == 200
+
+        body = response.json()
+
+        assert "assigned_customer" in body
+        assert body["assigned_customer"] is None
+
+    def test_pharmacist_cannot_access_other_org_prescription_detail(
+        self,
+        security_environment,
+    ):
+        """
+        A pharmacist from Organization B cannot retrieve a prescription
+        belonging to Organization A — they must receive 404, not 200.
+        This ensures assigned_customer data is never leaked across tenants.
+        """
+        env = security_environment
+
+        set_current_user(env["pharmacist_b"])
+
+        response = env["client"].get(
+            f"/prescriptions/{env['prescription_a'].prescription_id}"
+        )
+
+        assert response.status_code == 404

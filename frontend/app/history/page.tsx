@@ -25,6 +25,12 @@ type SafetyFlag = {
   message: string;
 };
 
+type AssignedCustomer = {
+  id: string;
+  name: string;
+  customer_code: string;
+};
+
 type Prescription = {
   id: string;
   prescription_id: string;
@@ -35,6 +41,7 @@ type Prescription = {
   file_name: string | null;
   created_at: string;
   medicines: Medicine[];
+  assigned_customer: AssignedCustomer | null;
 };
 
 const PAGE_SIZE = 20;
@@ -488,6 +495,7 @@ function HistoryContent() {
                       <th className="px-5 py-3.5 text-left font-medium">Date</th>
                       <th className="px-5 py-3.5 text-left font-medium">Pipeline</th>
                       <th className="px-5 py-3.5 text-left font-medium">Review status</th>
+                      <th className="px-5 py-3.5 text-left font-medium">Customer</th>
                       <th className="px-5 py-3.5 text-right font-medium">Medicines</th>
                       <th className="px-5 py-3.5 text-right font-medium">Safety</th>
                       <th className="px-5 py-3.5 text-right font-medium">Confidence</th>
@@ -544,6 +552,25 @@ function HistoryContent() {
                             </span>
                           </td>
 
+                          {/* Assigned customer */}
+                          <td className="px-5 py-4">
+                            {prescription.assigned_customer ? (
+                              <div>
+                                <Link
+                                  href={`/customers/${prescription.assigned_customer.id}`}
+                                  className="text-xs font-medium text-[#17211D] hover:underline"
+                                >
+                                  {prescription.assigned_customer.name}
+                                </Link>
+                                <div className="mt-0.5 font-mono text-[10px] text-[#8A948F]">
+                                  {prescription.assigned_customer.customer_code}
+                                </div>
+                              </div>
+                            ) : (
+                              <span className="text-xs text-[#9AA39E]">—</span>
+                            )}
+                          </td>
+
                           <td className="px-5 py-4 text-right">
                             <div className="text-xs font-medium">
                               {prescription.medicines.length}
@@ -586,12 +613,24 @@ function HistoryContent() {
                           </td>
 
                           <td className="px-5 py-4 text-right">
-                            <Link
-                              href={`/analysis/${prescription.prescription_id}`}
-                              className="text-xs font-medium text-[#526C5D] hover:underline"
-                            >
-                              Open →
-                            </Link>
+                            <div className="flex flex-col items-end gap-1.5">
+                              {(prescription.review_status === "pending" ||
+                                prescription.review_status === "under_review" ||
+                                prescription.review_status === "needs_clarification") && (
+                                <Link
+                                  href={`/review?prescription_id=${prescription.prescription_id}`}
+                                  className="text-xs font-semibold text-[#3B6B4F] hover:underline"
+                                >
+                                  Review →
+                                </Link>
+                              )}
+                              <Link
+                                href={`/analysis/${prescription.prescription_id}`}
+                                className="text-xs font-medium text-[#526C5D] hover:underline"
+                              >
+                                Open →
+                              </Link>
+                            </div>
                           </td>
                         </tr>
                       );

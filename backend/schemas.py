@@ -122,6 +122,14 @@ class SafetyFlagResponse(BaseModel):
     message: str
 
 
+class AssignedCustomerResponse(BaseModel):
+    """Minimal customer assignment metadata returned with a prescription."""
+
+    id: UUID
+    name: str
+    customer_code: str
+
+
 class PrescriptionResponse(BaseModel):
     id: UUID
     prescription_id: str
@@ -138,6 +146,9 @@ class PrescriptionResponse(BaseModel):
     # available via GET /prescriptions/{id}/image.
     # The internal filesystem path is never returned.
     has_image: bool = False
+
+    # Minimal assigned-customer metadata; None when no customer is assigned.
+    assigned_customer: Optional[AssignedCustomerResponse] = None
 
     created_at: datetime
     updated_at: Optional[datetime] = None
@@ -157,10 +168,15 @@ class PrescriptionResponse(BaseModel):
         Derive has_image from file_path on the ORM object.
         file_path itself is not included in the schema so
         the filesystem path is never serialised to clients.
+
+        Also derives assigned_customer from the customer relationship
+        when present, exposing only the three fields needed by the
+        pharmacist assignment UI.
         """
         if not isinstance(data, dict):
             # ORM instance — project to a plain dict so
             # Pydantic never sees file_path as a schema field
+            customer = data.customer
             return {
                 "id": data.id,
                 "prescription_id": data.prescription_id,
@@ -171,6 +187,15 @@ class PrescriptionResponse(BaseModel):
                 "file_name": data.file_name,
                 "file_type": data.file_type,
                 "has_image": bool(data.file_path),
+                "assigned_customer": (
+                    {
+                        "id": customer.id,
+                        "name": customer.name,
+                        "customer_code": customer.customer_code,
+                    }
+                    if customer is not None
+                    else None
+                ),
                 "created_at": data.created_at,
                 "updated_at": data.updated_at,
                 "medicines": list(data.medicines),

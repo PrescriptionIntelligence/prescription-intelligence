@@ -1,8 +1,8 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect, useMemo, useState } from "react";
-import { useRouter } from "next/navigation";
+import { Suspense, useEffect, useMemo, useState } from "react";
+import { useRouter, useSearchParams } from "next/navigation";
 import { authFetch, isAuthenticated } from "@/lib/auth";
 
 /* =========================================================
@@ -776,8 +776,11 @@ function FindingCard({
    REVIEW PAGE
    ========================================================= */
 
-export default function ReviewPage() {
+// Wrapped by ReviewPage below — must be a separate component
+// because useSearchParams requires a Suspense boundary.
+function ReviewContent() {
   const router = useRouter();
+  const searchParams = useSearchParams();
 
   const [result, setResult] =
     useState<PrescriptionResult | null>(null);
@@ -799,7 +802,12 @@ export default function ReviewPage() {
   const [error, setError] =
     useState<string | null>(null);
 
+  // True while we are fetching a prescription via URL param.
+  const [loadingEntry, setLoadingEntry] =
+    useState(false);
+
   useEffect(() => {
+    // Priority 1: sessionStorage from the upload/analyze flow.
     const storedResult =
       sessionStorage.getItem("prescription_review");
 
@@ -818,6 +826,66 @@ export default function ReviewPage() {
     if (storedFileName) {
       setFileName(storedFileName);
     }
+
+    // Priority 2: ?prescription_id= URL query param.
+    // Only used when sessionStorage is absent.
+    if (!storedResult) {
+      const urlPrescriptionId =
+        searchParams.get("prescription_id");
+
+      if (urlPrescriptionId) {
+        if (!isAuthenticated()) {
+          router.replace("/sign-in");
+          return;
+        }
+
+        setLoadingEntry(true);
+
+        authFetch(
+          `/prescriptions/${encodeURIComponent(
+            urlPrescriptionId
+          )}`
+        )
+          .then(async (res) => {
+            if (!res.ok) {
+              const body = await res
+                .json()
+                .catch(() => null);
+              throw new Error(
+                body?.detail ||
+                  "Prescription not found."
+              );
+            }
+            return res.json();
+          })
+          .then((data) => {
+            // Construct a minimal PrescriptionResult from
+            // the PrescriptionResponse so the review interface
+            // has the prescription data it needs.
+            setResult({
+              prescription_id: data.prescription_id,
+              file_name: data.file_name ?? undefined,
+              file_type: data.file_type ?? undefined,
+              status: data.status,
+              raw_text: data.raw_text ?? null,
+              medicines: data.medicines ?? [],
+              safety_flags: data.safety_flags ?? [],
+            });
+            setFileName(data.file_name ?? "");
+          })
+          .catch((err) => {
+            setError(
+              err instanceof Error
+                ? err.message
+                : "Unable to load prescription."
+            );
+          })
+          .finally(() => {
+            setLoadingEntry(false);
+          });
+      }
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const prescriptionId =
@@ -1152,6 +1220,21 @@ export default function ReviewPage() {
   const isFinalized =
     review?.review_status === "verified" ||
     review?.review_status === "rejected";
+
+  /* =======================================================
+     LOADING STATE (URL-param driven prescription fetch)
+     ======================================================= */
+
+  if (loadingEntry) {
+    return (
+      <main className="grid min-h-screen place-items-center bg-[#f1f5f2] text-[#17211d]">
+        <div className="flex items-center gap-3 text-sm text-[#718078]">
+          <span className="h-4 w-4 animate-spin rounded-full border-2 border-[#cfd8d3] border-t-[#17211d]" />
+          Loading prescription…
+        </div>
+      </main>
+    );
+  }
 
   /* =======================================================
      EMPTY STATE
@@ -1884,5 +1967,26 @@ export default function ReviewPage() {
         </div>
       </footer>
     </main>
+  );
+}
+
+// =========================================================
+// PAGE (Suspense wrapper required for useSearchParams)
+// =========================================================
+
+export default function ReviewPage() {
+  return (
+    <Suspense
+      fallback={
+        <main className="grid min-h-screen place-items-center bg-[#f1f5f2] text-[#17211d]">
+          <div className="flex items-center gap-3 text-sm text-[#718078]">
+            <span className="h-4 w-4 animate-spin rounded-full border-2 border-[#cfd8d3] border-t-[#17211d]" />
+            Loading…
+          </div>
+        </main>
+      }
+    >
+      <ReviewContent />
+    </Suspense>
   );
 }

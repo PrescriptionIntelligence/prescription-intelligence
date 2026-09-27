@@ -423,15 +423,15 @@ def get_dashboard_stats(
     # -----------------------------------------------------
     # Prescriptions requiring review
     # -----------------------------------------------------
+    # Count prescriptions whose review_status is "pending"
+    # (or NULL for legacy rows).  This matches the link
+    # destination /history?review_status=pending exactly.
+
+    from sqlalchemy import or_ as _or
 
     review_query = (
         db.query(
             PrescriptionDB.id
-        )
-        .join(
-            MedicineDB,
-            MedicineDB.prescription_id
-            == PrescriptionDB.id,
         )
     )
 
@@ -463,16 +463,14 @@ def get_dashboard_stats(
 
     needs_review = (
         review_query.filter(
-            (
-                MedicineDB.normalization_confidence
-                < 0.70
-            )
-            | (
-                MedicineDB.extraction_confidence
-                < 0.70
+            _or(
+                PrescriptionDB.review_status
+                == "pending",
+                PrescriptionDB.review_status.is_(
+                    None
+                ),
             )
         )
-        .distinct()
         .count()
     ) or 0
 
@@ -1268,7 +1266,10 @@ def list_prescriptions(
         .options(
             selectinload(
                 PrescriptionDB.medicines
-            )
+            ),
+            selectinload(
+                PrescriptionDB.customer
+            ),
         )
     )
 
@@ -1982,7 +1983,10 @@ def get_prescription(
         .options(
             selectinload(
                 PrescriptionDB.medicines
-            )
+            ),
+            selectinload(
+                PrescriptionDB.customer
+            ),
         )
         .filter(
             PrescriptionDB.prescription_id

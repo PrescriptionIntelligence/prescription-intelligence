@@ -53,6 +53,12 @@ type SafetyFlag = {
   resolution_reason?: string | null;
 };
 
+type AssignedCustomer = {
+  id: string;
+  name: string;
+  customer_code: string;
+};
+
 type Prescription = {
   id: string;
   prescription_id: string;
@@ -63,6 +69,7 @@ type Prescription = {
   file_type: string | null;
   /** True when an image is available via the authenticated image endpoint. */
   has_image: boolean;
+  assigned_customer: AssignedCustomer | null;
   created_at: string;
   updated_at: string | null;
   medicines: Medicine[];
@@ -580,6 +587,8 @@ export default function AnalysisDetailPage() {
               data.file_type,
             has_image:
               Boolean(data.has_image),
+            assigned_customer:
+              data.assigned_customer ?? null,
             created_at:
               new Date().toISOString(),
             updated_at:
@@ -618,6 +627,11 @@ export default function AnalysisDetailPage() {
       })
       .then((data) => {
         setPrescription(data);
+        // Hydrate assigned customer from the prescription response so
+        // the assignment survives page refresh and direct navigation.
+        if (data.assigned_customer) {
+          setAssignedCustomer(data.assigned_customer);
+        }
       })
       .catch((fetchError) => {
         setError(
