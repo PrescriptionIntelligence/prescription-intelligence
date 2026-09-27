@@ -935,3 +935,90 @@ class PasswordResetTokenDB(Base):
     user: Mapped["UserDB"] = relationship(
         foreign_keys=[user_id],
     )
+
+
+# =========================================================
+# CUSTOMER PHARMACY LINK REQUEST
+# =========================================================
+
+class CustomerPharmacyLinkRequestDB(Base):
+    """
+    Pending customer-consent request for a pharmacy to link
+    a global CustomerDB to their organization.
+
+    Workflow:
+        1. Pharmacist calls POST /customers/{id}/link.
+           A pending request is created; no membership yet.
+        2. Customer calls POST /customers/me/pharmacy-link/accept
+           with the raw token.
+        3. The backend verifies the hash, checks expiry/status,
+           then creates CustomerOrganizationDB and marks the
+           request accepted.
+
+    Security properties:
+        - Only the SHA-256 hash is stored (never the raw token).
+        - Token is 32 cryptographically-random bytes (64 hex chars).
+        - Requests expire after 72 hours.
+        - One-time: accepted/declined requests are not reusable.
+        - Scoped to (customer_id, organization_id) — cross-customer
+          and cross-organization misuse is rejected at acceptance.
+    """
+
+    __tablename__ = "customer_pharmacy_link_requests"
+
+    id: Mapped[UUID] = mapped_column(
+        primary_key=True,
+        default=uuid4,
+    )
+
+    customer_id: Mapped[UUID] = mapped_column(
+        ForeignKey("customers.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+
+    organization_id: Mapped[UUID] = mapped_column(
+        ForeignKey("organizations.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+
+    token_hash: Mapped[str] = mapped_column(
+        String(64),
+        nullable=False,
+        unique=True,
+        index=True,
+    )
+
+    # status: "pending" | "accepted" | "expired"
+    status: Mapped[str] = mapped_column(
+        String(16),
+        nullable=False,
+        default="pending",
+        index=True,
+    )
+
+    expires_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+    )
+
+    accepted_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+        default=None,
+    )
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc),
+    )
+
+    customer: Mapped["CustomerDB"] = relationship(
+        foreign_keys=[customer_id],
+    )
+
+    organization: Mapped["OrganizationDB"] = relationship(
+        foreign_keys=[organization_id],
+    )

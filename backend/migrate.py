@@ -20,6 +20,7 @@ from backend.models import (
     UserDB,
     CustomerDB,
     CustomerOrganizationDB,
+    CustomerPharmacyLinkRequestDB,
     PrescriptionDB,
     MedicineDB,
     ReviewAuditDB,

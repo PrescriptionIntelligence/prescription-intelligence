@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import hashlib
+import secrets
+from datetime import datetime, timedelta, timezone
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
@@ -12,6 +15,7 @@ from backend.auth import (
 from backend.database import get_db
 from backend.models import (
     CustomerDB,
+    CustomerPharmacyLinkRequestDB,
     PrescriptionDB,
     UserDB,
 )
@@ -19,6 +23,8 @@ from backend.schemas import (
     CustomerCreateRequest,
     CustomerResponse,
     CustomerSearchResponse,
+    PharmacyLinkAcceptRequest,
+    PharmacyLinkRequestResponse,
 )
 from backend.services.customer_service import (
     customer_belongs_to_organization,
@@ -27,6 +33,8 @@ from backend.services.customer_service import (
     get_customer_by_user,
     get_customer_organizations,
 )
+
+_LINK_TOKEN_EXPIRY_HOURS = 72
 
 
 router = APIRouter(prefix="/customers", tags=["Customers"])
@@ -324,15 +332,31 @@ def get_my_prescriptions(
 
 
 # =========================================================
-# LINK CUSTOMER TO ANOTHER PHARMACY
+# LINK CUSTOMER TO ANOTHER PHARMACY (creates pending request)
 # =========================================================
 
-@router.post("/{customer_id}/link")
-def link_customer_to_pharmacy(
+@router.post(
+    "/{customer_id}/link",
+    response_model=PharmacyLinkRequestResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+def request_customer_pharmacy_link(
     customer_id: UUID,
     current_user: UserDB = Depends(require_pharmacy_staff),
     db: Session = Depends(get_db),
 ):
+    """
+    Create a pending customer-pharmacy link request.
+
+    The pharmacist initiates the request; NO membership is
+    created at this point.  The customer must call
+    POST /customers/me/pharmacy-link/accept with the returned
+    token to consent and complete the link.
+
+    Returns HTTP 202 with the one-time token the pharmacist
+    (or the platform) must deliver to the customer.
+    """
+
     organization = current_user.organization
 
     if organization is None:
@@ -341,9 +365,14 @@ def link_customer_to_pharmacy(
             detail="Pharmacy organization is required",
         )
 
+    # Scope lookup to customers already within this pharmacist's
+    # organization so a pharmacist cannot enumerate global UUIDs.
     customer = (
         db.query(CustomerDB)
-        .filter(CustomerDB.id == customer_id)
+        .filter(
+            CustomerDB.id == customer_id,
+            CustomerDB.organization_id == organization.id,
+        )
         .first()
     )
 
@@ -353,37 +382,154 @@ def link_customer_to_pharmacy(
             detail="Customer not found",
         )
 
-    already_linked = customer_belongs_to_organization(
+    # If already linked, return a clear message without creating
+    # a duplicate request.
+    if customer_belongs_to_organization(
         customer.id,
         organization.id,
         db,
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Customer is already linked to this pharmacy",
+        )
+
+    # Generate a cryptographically-random one-time token.
+    raw_token = secrets.token_hex(32)  # 256-bit
+    token_hash = hashlib.sha256(raw_token.encode()).hexdigest()
+    expires_at = datetime.now(timezone.utc) + timedelta(
+        hours=_LINK_TOKEN_EXPIRY_HOURS
     )
 
-    if not already_linked:
-        ensure_customer_organization_link(
-            customer=customer,
-            organization=organization,
-            db=db,
+    link_request = CustomerPharmacyLinkRequestDB(
+        customer_id=customer.id,
+        organization_id=organization.id,
+        token_hash=token_hash,
+        status="pending",
+        expires_at=expires_at,
+    )
+
+    db.add(link_request)
+    db.commit()
+    db.refresh(link_request)
+
+    return PharmacyLinkRequestResponse(
+        message=(
+            "Link request created. "
+            "Deliver the token to the customer for consent."
+        ),
+        request_id=link_request.id,
+        customer_id=customer.id,
+        organization_id=organization.id,
+        token=raw_token,
+        expires_at=expires_at,
+    )
+
+
+# =========================================================
+# CUSTOMER ACCEPTS PHARMACY LINK REQUEST
+# =========================================================
+
+@router.post(
+    "/me/pharmacy-link/accept",
+    status_code=status.HTTP_200_OK,
+)
+def accept_pharmacy_link_request(
+    body: PharmacyLinkAcceptRequest,
+    current_user: UserDB = Depends(require_any_authenticated_user),
+    db: Session = Depends(get_db),
+):
+    """
+    Authenticated customer accepts a pending pharmacy-link request.
+
+    The customer submits the raw token they received.  The backend:
+      1. Hashes the token and looks up the request.
+      2. Verifies the request belongs to this customer's profile.
+      3. Checks the request is still pending and not expired.
+      4. Creates CustomerOrganizationDB membership.
+      5. Marks the request as accepted (one-time use).
+    """
+
+    if current_user.role != "customer":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Customer account required",
         )
+
+    customer = get_customer_by_user(current_user.id, db)
+
+    if customer is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Customer profile not found",
+        )
+
+    token_hash = hashlib.sha256(
+        body.token.encode()
+    ).hexdigest()
+
+    link_request = (
+        db.query(CustomerPharmacyLinkRequestDB)
+        .filter(
+            CustomerPharmacyLinkRequestDB.token_hash == token_hash
+        )
+        .first()
+    )
+
+    # Deliberately generic error: do not reveal whether the token
+    # exists, belongs to another customer, or is expired.
+    _invalid = HTTPException(
+        status_code=status.HTTP_400_BAD_REQUEST,
+        detail="Invalid or expired link token",
+    )
+
+    if link_request is None:
+        raise _invalid
+
+    # Case G — cross-customer manipulation
+    if link_request.customer_id != customer.id:
+        raise _invalid
+
+    # Case D/E — expired or already used
+    if link_request.status != "pending":
+        raise _invalid
+
+    now = datetime.now(timezone.utc)
+
+    # Normalize expires_at to UTC-aware for comparison; SQLite
+    # returns naive datetimes while PostgreSQL returns aware ones.
+    expires_at = link_request.expires_at
+    if expires_at.tzinfo is None:
+        expires_at = expires_at.replace(tzinfo=timezone.utc)
+
+    if expires_at < now:
+        link_request.status = "expired"
         db.commit()
+        raise _invalid
+
+    # Load the organization name before commit to avoid
+    # a post-commit lazy-load on an expired instance.
+    organization = link_request.organization
+    org_id = link_request.organization_id
+    org_name = organization.name
+
+    # Case F — duplicate membership is handled idempotently by
+    # ensure_customer_organization_link (no duplicate insert).
+    ensure_customer_organization_link(
+        customer=customer,
+        organization=organization,
+        db=db,
+    )
+
+    link_request.status = "accepted"
+    link_request.accepted_at = now
+
+    db.commit()
 
     return {
-        "message": (
-            "Customer is already linked to this pharmacy"
-            if already_linked
-            else "Customer linked to pharmacy successfully"
-        ),
-        "customer": {
-            "id": str(customer.id),
-            "customer_code": customer.customer_code,
-            "name": customer.name,
-        },
-        "pharmacy": {
-            "id": str(organization.id),
-            "name": organization.name,
-            "slug": organization.slug,
-        },
-        "already_linked": already_linked,
+        "message": "Pharmacy linked successfully",
+        "organization_id": str(org_id),
+        "organization_name": org_name,
     }
 
 

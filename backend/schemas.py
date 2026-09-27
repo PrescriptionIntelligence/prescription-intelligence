@@ -1,5 +1,6 @@
 from pydantic import (
     BaseModel,
+    ConfigDict,
     EmailStr,
     Field,
     field_validator,
@@ -560,3 +561,24 @@ class ResetPasswordRequest(BaseModel):
 
 class PasswordResetResponse(BaseModel):
     message: str
+
+
+class PharmacyLinkRequestResponse(BaseModel):
+    """Returned to the pharmacist after creating a pending link request."""
+
+    message: str
+    request_id: UUID
+    customer_id: UUID
+    organization_id: UUID
+    # The raw token is returned once so the pharmacist/system
+    # can deliver it to the customer (e.g. via SMS/email).
+    token: str
+    expires_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class PharmacyLinkAcceptRequest(BaseModel):
+    """Submitted by the authenticated customer to accept the link."""
+
+    token: str = Field(min_length=1, max_length=256)
