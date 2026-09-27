@@ -100,7 +100,7 @@ services:
       DB_PASSWORD: ${DB_PASSWORD:?DB_PASSWORD is required}
       DB_NAME: ${DB_NAME:-prescription_intelligence}
       ENVIRONMENT: ${ENVIRONMENT:-production}
-      SECRET_KEY: ${SECRET_KEY:-migration-placeholder}
+      SECRET_KEY: ${SECRET_KEY:?SECRET_KEY is required}
     command: ["alembic", "upgrade", "head"]
 
 

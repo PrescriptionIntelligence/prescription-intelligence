@@ -15,7 +15,7 @@ This document describes how to deploy Prescription Intelligence in a production 
                                │          │
                     ┌──────────▼─┐   ┌───▼─────────────┐
                     │  Frontend  │   │     Backend      │
-                    │ Next.js 15 │   │ FastAPI/uvicorn  │
+                    │ Next.js 16 │   │ FastAPI/uvicorn  │
                     │   :3000    │   │      :8000       │
                     └────────────┘   └─────┬──────┬─────┘
                                            │      │
