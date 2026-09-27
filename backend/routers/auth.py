@@ -386,7 +386,8 @@ def register(
     )
 
     # -----------------------------------------------------
-    # Prevent duplicate account
+    # Prevent duplicate account — generic response to avoid
+    # email enumeration (P7.12-A).
     # -----------------------------------------------------
 
     existing_user = (
@@ -398,10 +399,13 @@ def register(
     )
 
     if existing_user:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail="An account with this email already exists",
-        )
+        return {
+            "message": (
+                "If this email is not already registered, "
+                "your account has been created. "
+                "Please check your inbox to verify your email."
+            )
+        }
 
     # -----------------------------------------------------
     # Generate unique organization slug
@@ -568,7 +572,8 @@ def register_customer(
     )
 
     # -----------------------------------------------------
-    # Prevent duplicate account
+    # Prevent duplicate account — generic response to avoid
+    # email enumeration (P7.12-A).
     # -----------------------------------------------------
 
     existing_user = (
@@ -580,10 +585,13 @@ def register_customer(
     )
 
     if existing_user:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail="An account with this email already exists",
-        )
+        return {
+            "message": (
+                "If this email is not already registered, "
+                "your account has been created. "
+                "Please check your inbox to verify your email."
+            )
+        }
 
     # -----------------------------------------------------
     # Generate verification credentials
