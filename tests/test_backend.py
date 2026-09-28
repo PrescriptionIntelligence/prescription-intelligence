@@ -1043,17 +1043,17 @@ def inactive_user(auth_db_session):
 class TestAuthenticateHelper:
 
     def test_valid_credentials_return_token(self, active_user, auth_db_session):
-        result = _authenticate("test@example.com", "correct-password", auth_db_session)
+        result, _token = _authenticate("test@example.com", "correct-password", auth_db_session)
         assert "access_token" in result
         assert result["token_type"] == "bearer"
         assert result["user"]["email"] == "test@example.com"
 
     def test_email_is_case_insensitive(self, active_user, auth_db_session):
-        result = _authenticate("TEST@EXAMPLE.COM", "correct-password", auth_db_session)
+        result, _token = _authenticate("TEST@EXAMPLE.COM", "correct-password", auth_db_session)
         assert "access_token" in result
 
     def test_email_with_surrounding_whitespace(self, active_user, auth_db_session):
-        result = _authenticate("  test@example.com  ", "correct-password", auth_db_session)
+        result, _token = _authenticate("  test@example.com  ", "correct-password", auth_db_session)
         assert "access_token" in result
 
     def test_wrong_password_raises_401(self, active_user, auth_db_session):
@@ -1075,7 +1075,7 @@ class TestAuthenticateHelper:
         assert exc_info.value.status_code == 403
 
     def test_response_includes_user_fields(self, active_user, auth_db_session):
-        result = _authenticate("test@example.com", "correct-password", auth_db_session)
+        result, _token = _authenticate("test@example.com", "correct-password", auth_db_session)
         user = result["user"]
         assert user["email"] == "test@example.com"
         assert user["name"] == "Test User"
@@ -1083,7 +1083,7 @@ class TestAuthenticateHelper:
         assert "id" in user
 
     def test_response_includes_organization(self, active_user, auth_db_session):
-        result = _authenticate("test@example.com", "correct-password", auth_db_session)
+        result, _token = _authenticate("test@example.com", "correct-password", auth_db_session)
         assert result["organization"] is not None
         assert "slug" in result["organization"]
 
@@ -3523,6 +3523,7 @@ class TestJWTRoleTampering:
         token_test_user,
     ):
         from datetime import datetime, timedelta, timezone
+        from uuid import uuid4
 
         from jose import jwt
 
@@ -3534,6 +3535,7 @@ class TestJWTRoleTampering:
         now = datetime.now(timezone.utc)
 
         # Deliberately claim admin inside the JWT.
+        # Include jti so get_current_user() proceeds to the role check.
         token = jwt.encode(
             {
                 "sub": str(token_test_user.id),
@@ -3544,6 +3546,7 @@ class TestJWTRoleTampering:
                     else None
                 ),
                 "token_type": "access",
+                "jti": str(uuid4()),
                 "iat": now,
                 "exp": now + timedelta(minutes=5),
             },
@@ -3566,6 +3569,7 @@ class TestJWTRoleTampering:
         token_test_user,
     ):
         from datetime import datetime, timedelta, timezone
+        from uuid import uuid4
 
         from jose import jwt
 
@@ -3577,6 +3581,7 @@ class TestJWTRoleTampering:
         now = datetime.now(timezone.utc)
 
         # Deliberately claim admin inside the JWT.
+        # Include jti so get_current_user() proceeds to the role check.
         token = jwt.encode(
             {
                 "sub": str(token_test_user.id),
@@ -3587,6 +3592,7 @@ class TestJWTRoleTampering:
                     else None
                 ),
                 "token_type": "access",
+                "jti": str(uuid4()),
                 "iat": now,
                 "exp": now + timedelta(minutes=5),
             },

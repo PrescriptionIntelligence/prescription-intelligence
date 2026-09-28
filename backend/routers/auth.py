@@ -1,7 +1,10 @@
 from datetime import datetime, timedelta, timezone
+from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Request, status
-from fastapi.security import OAuth2PasswordRequestForm
+from fastapi import APIRouter, Cookie, Depends, HTTPException, Request, Response, status
+from fastapi.responses import JSONResponse
+from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
+from jose import JWTError
 from pydantic import BaseModel, EmailStr, Field
 from sqlalchemy.orm import Session
 
@@ -11,6 +14,7 @@ from backend.models import (
     CustomerDB,
     OrganizationDB,
     PasswordResetTokenDB,
+    RevokedAccessTokenDB,
     UserDB,
 )
 from backend.schemas import (
@@ -22,7 +26,14 @@ from backend.schemas import (
     VerifyEmailRequest,
 )
 from backend.security import (
+    ACCESS_TOKEN_EXPIRE_MINUTES,
+    ALGORITHM,
+    COOKIE_MAX_AGE,
+    COOKIE_NAME,
+    COOKIE_SECURE,
+    SECRET_KEY,
     create_access_token,
+    decode_access_token,
     generate_email_verification_token,
     generate_password_reset_token,
     hash_email_verification_token,
@@ -181,7 +192,10 @@ def _build_auth_response(
     message: str,
 ) -> dict:
     """
-    Build the common authentication response.
+    Build the common authentication response body.
+    access_token is kept in the JSON response for Swagger/Bearer
+    compatibility.  The caller is responsible for also setting
+    the HttpOnly cookie.
     """
 
     organization = user.organization
@@ -213,6 +227,21 @@ def _build_auth_response(
             else None
         ),
     }
+
+
+def _set_auth_cookie(response: Response, token: str) -> None:
+    """
+    Attach the HttpOnly session cookie to an existing response.
+    """
+    response.set_cookie(
+        key=COOKIE_NAME,
+        value=token,
+        httponly=True,
+        secure=COOKIE_SECURE,
+        samesite="lax",
+        path="/",
+        max_age=COOKIE_MAX_AGE,
+    )
 
 
 def _create_verification_data() -> tuple[str, str, datetime]:
@@ -256,7 +285,7 @@ def _authenticate(
     email: str,
     password: str,
     db: Session,
-) -> dict:
+) -> tuple[dict, str]:
     """
     Authenticate pharmacist, customer, or admin.
 
@@ -265,6 +294,9 @@ def _authenticate(
 
     Admin accounts are controlled separately and are
     not subject to public email registration.
+
+    Returns (response_body, raw_jwt_token) so callers can
+    attach the cookie and return the JSON body separately.
     """
 
     normalized_email = _normalize_email(
@@ -342,10 +374,13 @@ def _authenticate(
 
     db.commit()
 
-    return _build_auth_response(
-        user=user,
-        token=token,
-        message="Login successful",
+    return (
+        _build_auth_response(
+            user=user,
+            token=token,
+            message="Login successful",
+        ),
+        token,
     )
 
 
@@ -994,13 +1029,21 @@ def login(
 
     Pharmacist and customer accounts must have verified
     email addresses.
+
+    On success:
+        - Returns JSON body including access_token (Bearer compat)
+        - Sets HttpOnly pi_access_token cookie (browser auth)
     """
 
-    return _authenticate(
+    body_data, token = _authenticate(
         email=body.email,
         password=body.password,
         db=db,
     )
+
+    response = JSONResponse(content=body_data)
+    _set_auth_cookie(response, token)
+    return response
 
 
 # =========================================================
@@ -1028,13 +1071,122 @@ def token(
 
     username = user's email
     password = user's password
+
+    Also sets the HttpOnly cookie so Swagger users automatically
+    benefit from cookie authentication after authorization.
     """
 
-    return _authenticate(
+    body_data, raw_token = _authenticate(
         email=form_data.username,
         password=form_data.password,
         db=db,
     )
+
+    response = JSONResponse(content=body_data)
+    _set_auth_cookie(response, raw_token)
+    return response
+
+
+# =========================================================
+# LOGOUT
+# =========================================================
+
+# Reuse the same bearer extractor that get_current_user uses,
+# but with auto_error=False so unauthenticated logout is safe.
+_logout_bearer = OAuth2PasswordBearer(
+    tokenUrl="/auth/token",
+    auto_error=False,
+)
+
+
+@router.post("/logout")
+def logout(
+    response: Response,
+    bearer_token: Optional[str] = Depends(_logout_bearer),
+    cookie_token: Optional[str] = Cookie(
+        default=None, alias=COOKIE_NAME
+    ),
+    db: Session = Depends(get_db),
+):
+    """
+    Revoke the current JWT and clear the HttpOnly session cookie.
+
+    Per-token revocation via jti denylist:
+        - Extracts the JWT from cookie (preferred) or Bearer header.
+        - Adds the jti to revoked_access_tokens so the same token
+          cannot be replayed via either cookie or Bearer transport.
+        - Clears the browser cookie.
+        - Other sessions (different jti) remain valid.
+
+    If no token is present (already-expired cookie, no auth header)
+    the cookie is still cleared and 200 is returned.  Logout must
+    never fail for the user.
+
+    The raw JWT is NOT stored — only the jti identifier.
+    """
+    # Cookie preferred, fall back to Bearer (same priority as get_current_user).
+    token = cookie_token or bearer_token
+
+    if token:
+        try:
+            payload = decode_access_token(token)
+            jti = payload.get("jti")
+            user_id_str = payload.get("sub")
+
+            if jti and user_id_str:
+                from uuid import UUID as _UUID
+                try:
+                    user_uuid = _UUID(user_id_str)
+                except (ValueError, AttributeError):
+                    user_uuid = None
+
+                if user_uuid:
+                    # Determine token exp for denylist row lifetime.
+                    exp = payload.get("exp")
+                    if exp:
+                        from datetime import datetime as _dt, timezone as _tz, timedelta as _td
+                        try:
+                            expires_at = _dt.fromtimestamp(int(exp), tz=_tz.utc)
+                        except (TypeError, ValueError, OverflowError):
+                            expires_at = (
+                                _dt.now(_tz.utc)
+                                + _td(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+                            )
+                    else:
+                        from datetime import datetime as _dt, timezone as _tz, timedelta as _td
+                        expires_at = (
+                            _dt.now(_tz.utc)
+                            + _td(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+                        )
+
+                    # Idempotent: only insert if not already revoked.
+                    existing = (
+                        db.query(RevokedAccessTokenDB)
+                        .filter(RevokedAccessTokenDB.jti == jti)
+                        .first()
+                    )
+                    if not existing:
+                        revoked = RevokedAccessTokenDB(
+                            jti=jti,
+                            user_id=user_uuid,
+                            expires_at=expires_at,
+                        )
+                        db.add(revoked)
+                        try:
+                            db.commit()
+                        except Exception:
+                            db.rollback()
+                            # Non-fatal: cookie is still cleared below.
+
+        except (JWTError, Exception):
+            # Expired / invalid token — still safe to clear the cookie.
+            pass
+
+    response.delete_cookie(
+        key=COOKIE_NAME,
+        path="/",
+    )
+    return {"message": "Logged out successfully"}
 
 
 # =========================================================
@@ -1231,11 +1383,19 @@ def reset_password(
         )
 
     # ---------------------------------------------------------
-    # Update password and invalidate token atomically
+    # Update password, consume reset token, and set global
+    # revocation fence — all three changes are atomic.
+    #
+    # tokens_valid_after is set to current whole-second UTC.
+    # The JWT iat comparison uses strict < so tokens issued
+    # in the same second as the fence are accepted (valid
+    # post-reset logins).  Tokens issued strictly before the
+    # fence second are always rejected.
     # ---------------------------------------------------------
 
     user.password_hash = hash_password(body.new_password)
     reset_record.used_at = now
+    user.tokens_valid_after = now.replace(microsecond=0)
 
     try:
         db.commit()

@@ -3,6 +3,7 @@ import os
 import secrets
 from datetime import datetime, timedelta, timezone
 from typing import Optional
+from uuid import uuid4
 
 from jose import JWTError, jwt
 from passlib.context import CryptContext
@@ -40,6 +41,19 @@ SECRET_KEY = (
 ALGORITHM = "HS256"
 
 ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24
+
+# =========================================================
+# COOKIE CONFIGURATION
+# =========================================================
+
+COOKIE_NAME = "pi_access_token"
+
+# Max-Age aligned with JWT lifetime (24 h = 86400 s).
+COOKIE_MAX_AGE = 86400
+
+# Secure flag must only be True in production so that local
+# plain-HTTP development continues to work.
+COOKIE_SECURE = ENVIRONMENT == "production"
 
 
 # =========================================================
@@ -127,6 +141,10 @@ def create_access_token(
     """
     Create a short-purpose access token containing the minimum
     identity information required by the API.
+
+    Each token receives a unique `jti` (JWT ID) so individual
+    tokens can be added to the revocation denylist on logout
+    without invalidating all other sessions for the same user.
     """
 
     now = datetime.now(timezone.utc)
@@ -140,6 +158,7 @@ def create_access_token(
         "role": role,
         "organization_id": organization_id,
         "token_type": "access",
+        "jti": str(uuid4()),
         "iat": now,
         "exp": expire,
     }

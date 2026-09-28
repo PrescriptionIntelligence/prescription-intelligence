@@ -178,6 +178,14 @@ class UserDB(Base):
         nullable=True,
     )
 
+    # Tokens issued before this timestamp are no longer valid.
+    # NULL means no revocation fence is active.
+    tokens_valid_after: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+        default=None,
+    )
+
     organization: Mapped["OrganizationDB | None"] = relationship(
         back_populates="users",
     )
@@ -1021,4 +1029,61 @@ class CustomerPharmacyLinkRequestDB(Base):
 
     organization: Mapped["OrganizationDB"] = relationship(
         foreign_keys=[organization_id],
+    )
+
+
+# =========================================================
+# REVOKED ACCESS TOKENS
+# =========================================================
+
+class RevokedAccessTokenDB(Base):
+    """
+    Per-token revocation denylist for logout.
+
+    Only the JWT ID (jti) is stored — the raw JWT is never
+    persisted.  Rows may be cleaned up once expires_at has
+    passed; until then they block replay of the revoked token.
+
+    For global invalidation (password reset) the
+    UserDB.tokens_valid_after fence is used instead so this
+    table stays small.
+    """
+
+    __tablename__ = "revoked_access_tokens"
+
+    id: Mapped[UUID] = mapped_column(
+        primary_key=True,
+        default=uuid4,
+    )
+
+    jti: Mapped[str] = mapped_column(
+        String(36),   # UUID canonical form: 8-4-4-4-12
+        nullable=False,
+        unique=True,
+        index=True,
+    )
+
+    user_id: Mapped[UUID] = mapped_column(
+        ForeignKey(
+            "users.id",
+            ondelete="CASCADE",
+        ),
+        nullable=False,
+        index=True,
+    )
+
+    expires_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        index=True,
+    )
+
+    revoked_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc),
+    )
+
+    user: Mapped["UserDB"] = relationship(
+        foreign_keys=[user_id],
     )

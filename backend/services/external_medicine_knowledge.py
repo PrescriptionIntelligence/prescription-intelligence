@@ -13,6 +13,8 @@ from __future__ import annotations
 import json
 import logging
 import re
+import threading
+import time
 from urllib.parse import quote
 from urllib.request import Request, urlopen
 
@@ -22,6 +24,71 @@ RXNORM_BASE_URL = "https://rxnav.nlm.nih.gov/REST"
 
 DEFAULT_TIMEOUT_SECONDS = 3.0
 DEFAULT_TOP_K = 5
+
+# =========================================================
+# In-process external lookup cache
+#
+# Prevents repeated live RxNorm calls for the same medicine
+# text within a single process/worker lifetime.
+#
+# Cache design:
+#   key   = (normalised_text, top_k)
+#   value = (result_list, inserted_at_monotonic_seconds)
+#
+# TTL: 1 hour.  Entries are evicted lazily on access.
+# Cache is bounded to EXTERNAL_CACHE_MAX_SIZE entries.
+# No persistence — the in-process cache is purely advisory.
+# =========================================================
+
+_EXTERNAL_CACHE_TTL_SECONDS = 3600  # 1 hour
+_EXTERNAL_CACHE_MAX_SIZE = 1000
+
+_external_cache: dict[
+    tuple[str, int],
+    tuple[list[dict], float],
+] = {}
+_external_cache_lock = threading.Lock()
+
+
+def _cache_get(
+    key: tuple[str, int],
+) -> list[dict] | None:
+    with _external_cache_lock:
+        entry = _external_cache.get(key)
+        if entry is None:
+            return None
+        result, inserted_at = entry
+        age = time.monotonic() - inserted_at
+        if age > _EXTERNAL_CACHE_TTL_SECONDS:
+            del _external_cache[key]
+            return None
+        return result
+
+
+def _cache_put(
+    key: tuple[str, int],
+    result: list[dict],
+) -> None:
+    with _external_cache_lock:
+        # Evict oldest entries when the cache is full.
+        if len(_external_cache) >= _EXTERNAL_CACHE_MAX_SIZE:
+            oldest_key = min(
+                _external_cache,
+                key=lambda k: _external_cache[k][1],
+            )
+            del _external_cache[oldest_key]
+        _external_cache[key] = (result, time.monotonic())
+
+
+def clear_external_lookup_cache() -> None:
+    """
+    Clear the in-process external lookup cache.
+
+    Useful in tests and after bulk vocabulary import to ensure
+    fresh external lookups are made.
+    """
+    with _external_cache_lock:
+        _external_cache.clear()
 
 # RxNorm's approximate-match score is a lexical ranking signal, not
 # a normalized probability. We therefore use rank + score ordering
@@ -380,10 +447,22 @@ def lookup_external_medicine(
     Currently backed by RxNorm. Keeping this abstraction separate
     allows future CDSCO/reference adapters to be added without
     changing the normalizer.
+
+    Results are cached in-process (TTL 1 hour) to avoid repeated
+    live API calls for the same medicine text within a worker lifetime.
+    The cache is purely advisory — it never replaces the local
+    curated vocabulary for previously imported medicines.
     """
 
+    normalised = _normalize_match_text(medicine_text)
+    cache_key = (normalised, top_k)
+
+    cached = _cache_get(cache_key)
+    if cached is not None:
+        return cached
+
     try:
-        return lookup_rxnorm(
+        result = lookup_rxnorm(
             medicine_text,
             top_k=top_k,
             timeout=timeout,
@@ -394,3 +473,6 @@ def lookup_external_medicine(
             exc_info=True,
         )
         return []
+
+    _cache_put(cache_key, result)
+    return result
